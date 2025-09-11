@@ -15,6 +15,10 @@ CMakeCache.txt
 cmake_install.cmake
 Makefile
 
+choc/
+include/choc/*
+include/choc
+
 # Compiled object files and executables
 *.o
 *.obj
