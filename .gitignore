@@ -1,0 +1,37 @@
+# IDE settings
+.idea/
+.vscode/
+*.iml
+*.user
+
+# CMake build folders
+cmake-build-*/
+build/
+build-*/
+
+# CMake generated files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Compiled object files and executables
+*.o
+*.obj
+*.so
+*.dll
+*.dylib
+*.exe
+*.out
+*.app
+consoleAppStaticPlayer
+
+# Debug and log files
+*.log
+*.dSYM/
+*.pdb
+
+# System files
+.DS_Store
+Thumbs.db
+*.tmp
