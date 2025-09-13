@@ -1,5 +1,5 @@
 #pragma once
-#include "AudioModule.h"
+#include "AudioGenerator.h"
 #include "choc/audio/choc_AudioFileFormat.h"
 #include <string>
 #include <fstream>
