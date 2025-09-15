@@ -1,6 +1,19 @@
 cmake_minimum_required(VERSION 3.20)
 project(consoleAppStaticPlayer)
 
+# Apply CHOC JACK disable patch (cross-platform)
+execute_process(
+    COMMAND sed -i.bak "s/#define __UNIX_JACK__ 1/\\/\\/ #define __UNIX_JACK__ 1/" 
+        ${CMAKE_SOURCE_DIR}/external/choc/choc/audio/io/choc_RtAudioPlayer.h
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    RESULT_VARIABLE PATCH_RESULT
+)
+if(PATCH_RESULT EQUAL 0)
+    message(STATUS "Applied CHOC JACK disable patch")
+else()
+    message(WARNING "Failed to apply CHOC JACK patch, may already be applied")
+endif()
+
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 20)
 
@@ -30,8 +43,6 @@ elseif(UNIX AND NOT APPLE)
     pkg_check_modules(GTK3 REQUIRED gtk+-3.0)
     find_package(Threads REQUIRED)
     
-    # Enable ALSA only, disable JACK completely
-    add_definitions(-D__LINUX_ALSA__=1 -U__UNIX_JACK__)
     
     target_include_directories(consoleAppStaticPlayer PRIVATE 
         ${ALSA_INCLUDE_DIRS}
