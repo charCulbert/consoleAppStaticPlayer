@@ -48,3 +48,6 @@ external/choc/
 *.mp3
 *.flac
 *.aiff
+claude/
+CLAUDE.md
+.claude/

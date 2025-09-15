@@ -25,6 +25,7 @@ include_directories(
 
 add_executable(consoleAppStaticPlayer
     src/main.cpp
+    src/BufferedAudioFilePlayer.cpp
 )
 
 if(APPLE)
