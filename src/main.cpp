@@ -3,6 +3,7 @@
 #include <chrono>
 #include <filesystem>
 #include <iomanip>
+#include <algorithm>
 
 #include "choc/audio/io/choc_RtAudioPlayer.h"
 #include "choc/gui/choc_MessageLoop.h"
@@ -10,6 +11,7 @@
 #include "choc/text/choc_Files.h"
 #include "choc/audio/choc_AudioFileFormat_WAV.h"
 #include "BufferedAudioFilePlayer.h"
+#include "UdpSender.h"
 
 struct Settings {
     int sampleRate = 48000;
@@ -17,11 +19,18 @@ struct Settings {
     int outputChannels = 6;
     int inputChannels = 0;
     std::string audioFilePath = "../test_6ch.wav"; // Use the sine wave file for testing!
+    std::string preferredAudioInterface = ""; // Empty = use default, otherwise search for matching interface name
+
+    // UDP messaging settings
+    bool udpEnabled = true;
+    std::string udpAddress = "255.255.255.255"; // Broadcast by default
+    int udpPort = 8080;
+    std::string udpMessage = "LOOP";
 };
 
 Settings loadSettings() {
     Settings settings;
-    const std::string settingsFile = "audio_settings.json";
+    const std::string settingsFile = "consoleAudioPlayer.config.json";
 
     try {
         if (std::filesystem::exists(settingsFile)) {
@@ -33,6 +42,12 @@ Settings loadSettings() {
             settings.outputChannels = json["outputChannels"].getWithDefault<int>(settings.outputChannels);
             settings.inputChannels  = json["inputChannels"] .getWithDefault<int>(settings.inputChannels);
             settings.audioFilePath  = json["audioFilePath"] .getWithDefault<std::string>(settings.audioFilePath);
+            settings.preferredAudioInterface = json["preferredAudioInterface"].getWithDefault<std::string>(settings.preferredAudioInterface);
+
+            settings.udpEnabled     = json["udpEnabled"]    .getWithDefault<bool>(settings.udpEnabled);
+            settings.udpAddress     = json["udpAddress"]    .getWithDefault<std::string>(settings.udpAddress);
+            settings.udpPort        = json["udpPort"]       .getWithDefault<int>(settings.udpPort);
+            settings.udpMessage     = json["udpMessage"]    .getWithDefault<std::string>(settings.udpMessage);
         }
     } catch (const std::exception& e) {
         std::cout << "Warning: Could not load settings, using defaults: " << e.what() << std::endl;
@@ -47,21 +62,57 @@ void saveSettings(const Settings& settings) {
             "blockSize", settings.blockSize,
             "outputChannels", settings.outputChannels,
             "inputChannels", settings.inputChannels,
-            "audioFilePath", settings.audioFilePath
+            "audioFilePath", settings.audioFilePath,
+            "preferredAudioInterface", settings.preferredAudioInterface,
+            "udpEnabled", settings.udpEnabled,
+            "udpAddress", settings.udpAddress,
+            "udpPort", settings.udpPort,
+            "udpMessage", settings.udpMessage
         );
-        choc::file::replaceFileWithContent("audio_settings.json", choc::json::toString(json, true));
+        choc::file::replaceFileWithContent("consoleAudioPlayer.config.json", choc::json::toString(json, true));
     } catch (const std::exception& e) {
         std::cout << "Warning: Could not save settings: " << e.what() << std::endl;
     }
 }
 
 std::unique_ptr<choc::audio::io::RtAudioMIDIPlayer> createAudioPlayer(const Settings& settings, double preferredSampleRate, auto logMessage) {
-    // First try preferred sample rate
+    // Try to find preferred audio interface if specified
+    std::string preferredDeviceID;
+    if (!settings.preferredAudioInterface.empty()) {
+        auto player = std::make_unique<choc::audio::io::RtAudioMIDIPlayer>(choc::audio::io::AudioDeviceOptions{}, logMessage);
+        auto devices = player->getAvailableOutputDevices();
+
+        std::cout << "\nSearching for audio interface containing: \"" << settings.preferredAudioInterface << "\"" << std::endl;
+        std::cout << "Available output devices:" << std::endl;
+
+        for (const auto& device : devices) {
+            std::cout << "  - " << device.name << " (ID: " << device.deviceID << ")" << std::endl;
+
+            // Case-insensitive search for the preferred name in device name
+            std::string deviceNameLower = device.name;
+            std::string preferredLower = settings.preferredAudioInterface;
+            std::transform(deviceNameLower.begin(), deviceNameLower.end(), deviceNameLower.begin(), ::tolower);
+            std::transform(preferredLower.begin(), preferredLower.end(), preferredLower.begin(), ::tolower);
+
+            if (deviceNameLower.find(preferredLower) != std::string::npos) {
+                preferredDeviceID = device.deviceID;
+                std::cout << "  -> Found matching device: " << device.name << std::endl;
+                break;
+            }
+        }
+
+        if (preferredDeviceID.empty()) {
+            std::cout << "  -> No matching device found, using default" << std::endl;
+        }
+    }
+
+    // Set up audio device options
     choc::audio::io::AudioDeviceOptions options;
     options.sampleRate = preferredSampleRate;
     options.blockSize = settings.blockSize;
     options.outputChannelCount = settings.outputChannels;
     options.inputChannelCount = settings.inputChannels;
+    options.outputDeviceID = preferredDeviceID; // Use found device or empty for default
 
     auto player = std::make_unique<choc::audio::io::RtAudioMIDIPlayer>(options, logMessage);
 
@@ -158,12 +209,30 @@ int main()
     // Pre-fill buffer before starting audio callbacks
     audioFilePlayer->startPlayback();
 
+    // Setup UDP sender if enabled
+    std::unique_ptr<UdpSender> udpSender;
+    if (settings.udpEnabled) {
+        udpSender = std::make_unique<UdpSender>(settings.udpAddress, settings.udpPort);
+        std::cout << "UDP messaging enabled - target: " << settings.udpAddress << ":" << settings.udpPort
+                  << " message: \"" << settings.udpMessage << "\"" << std::endl;
+    }
+
     std::cout << "Adding audio callback..." << std::endl;
     player->addCallback(*audioFilePlayer);
     std::cout << "Playing file: " << settings.audioFilePath << "..." << std::endl;
 
     while (audioFilePlayer->isStillPlaying()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        // Check for loop detection and send UDP message
+        if (udpSender && audioFilePlayer->getLoopPlaybackDetected()) {
+            if (udpSender->send(settings.udpMessage)) {
+                std::cout << "UDP message sent: \"" << settings.udpMessage << "\" to "
+                          << settings.udpAddress << ":" << settings.udpPort << std::endl;
+            } else {
+                std::cout << "Failed to send UDP message" << std::endl;
+            }
+        }
 
         // Monitor buffer health
         static int reportCount = 0;
@@ -188,8 +257,6 @@ int main()
     std::cout << "\nPlayback finished." << std::endl;
 
     player->removeCallback(*audioFilePlayer);
-    saveSettings(settings);
-    std::cout << "Settings saved." << std::endl;
 
     return 0;
 }

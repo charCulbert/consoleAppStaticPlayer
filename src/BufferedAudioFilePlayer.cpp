@@ -179,6 +179,10 @@ void BufferedAudioFilePlayer::fillBufferFromFile()
     // Handle file looping
     if (currentFilePos >= totalFrames)
     {
+        // Loop detected - increment sequence number and mark buffer position
+        loopSequenceNumber.fetch_add(1);
+        samplesUntilLoopAudible.store(audioBuffer.getUsedSlots());
+
         currentFilePos = 0;
         fileReadPosition = 0;
     }
@@ -192,6 +196,9 @@ void BufferedAudioFilePlayer::fillBufferFromFile()
         if (actualFramesToRead == 0)
         {
             // End of file, loop back
+            loopSequenceNumber.fetch_add(1);
+            samplesUntilLoopAudible.store(audioBuffer.getUsedSlots());
+
             currentFilePos = 0;
             fileReadPosition = 0;
             return;
@@ -361,6 +368,29 @@ void BufferedAudioFilePlayer::processSubBlock(const choc::audio::AudioMIDIBlockD
                      << audioBuffer.getUsedSlots() << std::endl;
         }
         return;
+    }
+
+    // Loop playback detection - check if we've played enough samples to reach a loop point
+    static uint32_t lastSeenLoopSeq = 0;
+    static uint32_t samplesConsumedSinceLastLoop = 0;
+
+    uint32_t currentLoopSeq = loopSequenceNumber.load();
+    uint32_t samplesToLoop = samplesUntilLoopAudible.load();
+
+    // New loop detected?
+    if (currentLoopSeq > lastSeenLoopSeq)
+    {
+        samplesConsumedSinceLastLoop = 0;  // Reset counter
+        lastSeenLoopSeq = currentLoopSeq;
+    }
+
+    // Check if we've played enough samples to reach the loop point
+    samplesConsumedSinceLastLoop += samplesNeeded;
+    if (samplesToLoop > 0 && samplesConsumedSinceLastLoop >= samplesToLoop)
+    {
+        loopPlaybackDetected.store(true);  // Signal UDP sender
+        samplesUntilLoopAudible.store(0);  // Clear marker
+        std::cout << "Loop playback detected! Sequence: " << currentLoopSeq << std::endl;
     }
 
     // Read samples from buffer and convert from interleaved to channel format

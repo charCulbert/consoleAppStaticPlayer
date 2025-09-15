@@ -33,6 +33,9 @@ public:
     uint32_t getBufferUsedSlots() const { return audioBuffer.getUsedSlots(); }
     uint32_t getBufferSize() const { return bufferSize; }
 
+    // For loop detection and UDP messaging
+    std::atomic<bool> getLoopPlaybackDetected() { return loopPlaybackDetected.exchange(false); }
+
 private:
     std::string filePath;
     std::shared_ptr<std::ifstream> fileStream;
@@ -58,6 +61,11 @@ private:
     // Background loading
     choc::threading::TaskThread backgroundThread;
     std::atomic<bool> shouldStopLoading{false};
+
+    // Loop detection atomics
+    std::atomic<uint32_t> loopSequenceNumber{0};
+    std::atomic<uint32_t> samplesUntilLoopAudible{0};
+    std::atomic<bool> loopPlaybackDetected{false};
 
     bool loadAudioFile();
     void backgroundLoadingTask();
