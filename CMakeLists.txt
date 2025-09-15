@@ -10,9 +10,19 @@ include_directories(
         include/
 )
 
+# Create a patch target that runs before build
+add_custom_target(patch_choc
+    COMMAND sed -i.bak "s/#define __UNIX_JACK__ 1/#ifndef __UNIX_JACK__\\n#define __UNIX_JACK__ 1\\n#endif/"
+        ${CMAKE_SOURCE_DIR}/external/choc/choc/audio/io/choc_RtAudioPlayer.h
+    COMMENT "Patching CHOC to respect JACK defines"
+)
+
 add_executable(consoleAppStaticPlayer
         src/main.cpp
 )
+
+# Make sure the patch runs before building the executable
+add_dependencies(consoleAppStaticPlayer patch_choc)
 
 
 if(APPLE)
