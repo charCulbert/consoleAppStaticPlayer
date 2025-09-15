@@ -39,3 +39,12 @@ consoleAppStaticPlayer
 .DS_Store
 Thumbs.db
 *.tmp
+
+# Cache directories
+.cache/
+
+# Audio test files
+*.wav
+*.mp3
+*.flac
+*.aiff
