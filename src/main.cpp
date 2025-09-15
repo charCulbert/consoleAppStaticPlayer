@@ -118,15 +118,26 @@ int main()
     }
 
     std::cout << "Audio setup complete:" << std::endl;
-    std::cout << "  Sample rate: " << player->options.sampleRate << " Hz" << std::endl;
-    std::cout << "  Block size: " << player->options.blockSize << " samples" << std::endl;
-    std::cout << "  Output channels: " << player->options.outputChannelCount << std::endl;
+    std::cout << "  Sample rate: " << player->options.sampleRate << " Hz"
+              << std::endl;
+    std::cout << "  Block size: " << player->options.blockSize << " samples"
+              << std::endl;
+    std::cout << "  Output channels: " << player->options.outputChannelCount
+              << std::endl;
     std::cout << std::endl;
 
-    auto audioGenerator = std::make_unique<AudioGenerator>();
-    player->addCallback (*audioGenerator);
+    // MODIFICATION: Define your desired duration
+    const double beepDurationInSeconds =
+        5.0; // Change this value to whatever you want
 
-    std::cout << "Playing beep (440Hz square wave for 2 seconds)..." << std::endl;
+    // MODIFICATION: Pass the sample rate and duration to the constructor
+    auto audioGenerator = std::make_unique<AudioGenerator>(
+        player->options.sampleRate, beepDurationInSeconds);
+    player->addCallback(*audioGenerator);
+
+    // Update the log message to be dynamic
+    std::cout << "Playing beep (440Hz square wave for " << beepDurationInSeconds
+              << " seconds)..." << std::endl;
 
     choc::messageloop::initialise();
 
@@ -138,7 +149,7 @@ int main()
 
         auto elapsed = std::chrono::steady_clock::now() - startTime;
 
-        if (elapsed > std::chrono::seconds (3))
+        if (elapsed > std::chrono::seconds (20))
         {
             std::cout << "Timeout reached, stopping..." << std::endl;
             break;

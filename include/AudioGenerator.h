@@ -5,10 +5,14 @@
 
 struct AudioGenerator    : public choc::audio::io::AudioMIDICallback
 {
-    AudioGenerator() : squareWave()
+    // MODIFICATION: Update the constructor
+    AudioGenerator(double sampleRate, double durationInSeconds)
     {
-        // Will be properly set by sampleRateChanged callback
-        squareWave.setFrequency (440.0f, 44100.0f);
+        // Set the oscillator frequency correctly with the provided sample rate
+        squareWave.setFrequency (440.0f, static_cast<float> (sampleRate));
+        
+        // Calculate the maximum number of samples to play
+        maxSamples = static_cast<uint32_t>(sampleRate * durationInSeconds);
     }
 
     void sampleRateChanged (double newRate) override
@@ -72,5 +76,7 @@ private:
     choc::oscillator::Square<float> squareWave;
     bool isPlaying = true;
     uint32_t samplesPlayed = 0;
-    uint32_t maxSamples = 44100 * 2;
+	//
+    // MODIFICATION: This is now calculated in the constructor
+    uint32_t maxSamples = 0;
 };
