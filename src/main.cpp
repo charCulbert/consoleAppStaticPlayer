@@ -5,6 +5,12 @@
 #include <iomanip>
 #include <algorithm>
 
+#ifdef __linux__
+    #include <unistd.h>
+    #include <sys/types.h>
+    #include <pwd.h>
+#endif
+
 #include "choc/audio/io/choc_RtAudioPlayer.h"
 #include "choc/gui/choc_MessageLoop.h"
 #include "choc/text/choc_JSON.h"
@@ -28,9 +34,32 @@ struct Settings {
     std::string udpMessage = "LOOP";
 };
 
+std::string getConfigFilePath() {
+#ifdef __linux__
+    // For Yocto/Linux: use /var/lib/consoleAudioPlayer/ for writable config
+    const std::string configDir = "/var/lib/consoleAudioPlayer";
+
+    // Create directory if it doesn't exist
+    try {
+        if (!std::filesystem::exists(configDir)) {
+            std::filesystem::create_directories(configDir);
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Warning: Could not create config directory " << configDir
+                  << ", falling back to current directory: " << e.what() << std::endl;
+        return "consoleAudioPlayer.config.json";
+    }
+
+    return configDir + "/consoleAudioPlayer.config.json";
+#else
+    // For macOS/Windows: use current working directory
+    return "consoleAudioPlayer.config.json";
+#endif
+}
+
 Settings loadSettings() {
     Settings settings;
-    const std::string settingsFile = "consoleAudioPlayer.config.json";
+    const std::string settingsFile = getConfigFilePath();
 
     try {
         if (std::filesystem::exists(settingsFile)) {
@@ -55,25 +84,6 @@ Settings loadSettings() {
     return settings;
 }
 
-void saveSettings(const Settings& settings) {
-    try {
-        auto json = choc::json::create(
-            "sampleRate", settings.sampleRate,
-            "blockSize", settings.blockSize,
-            "outputChannels", settings.outputChannels,
-            "inputChannels", settings.inputChannels,
-            "audioFilePath", settings.audioFilePath,
-            "preferredAudioInterface", settings.preferredAudioInterface,
-            "udpEnabled", settings.udpEnabled,
-            "udpAddress", settings.udpAddress,
-            "udpPort", settings.udpPort,
-            "udpMessage", settings.udpMessage
-        );
-        choc::file::replaceFileWithContent("consoleAudioPlayer.config.json", choc::json::toString(json, true));
-    } catch (const std::exception& e) {
-        std::cout << "Warning: Could not save settings: " << e.what() << std::endl;
-    }
-}
 
 std::unique_ptr<choc::audio::io::RtAudioMIDIPlayer> createAudioPlayer(const Settings& settings, double preferredSampleRate, auto logMessage) {
     // Try to find preferred audio interface if specified
