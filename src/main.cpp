@@ -122,7 +122,19 @@ std::unique_ptr<choc::audio::io::RtAudioMIDIPlayer> createAudioPlayer(const Sett
     if (!settings.preferredAudioInterface.empty()) {
         DEBUG_PRINT("Looking for preferred interface: " << settings.preferredAudioInterface);
 
-        auto player = std::make_unique<choc::audio::io::RtAudioMIDIPlayer>(choc::audio::io::AudioDeviceOptions{}, logMessage);
+        // First pass: enumerate with MIDI filtering to avoid memory exhaustion
+        choc::audio::io::AudioDeviceOptions enumOptions;
+
+        // Only allow the Raspberry Pi Pico MIDI device
+        enumOptions.shouldOpenMIDIInput = [](const std::string& name) {
+            return name.find("Pico") != std::string::npos ||
+                   name.find("Raspberry Pi") != std::string::npos;
+        };
+        enumOptions.shouldOpenMIDIOutput = [](const std::string& name) {
+            return false; // Don't open any MIDI outputs for now
+        };
+
+        auto player = std::make_unique<choc::audio::io::RtAudioMIDIPlayer>(enumOptions, logMessage);
         DEBUG_PRINT("Created temporary player for device enumeration");
 
         auto devices = player->getAvailableOutputDevices();
@@ -158,6 +170,17 @@ std::unique_ptr<choc::audio::io::RtAudioMIDIPlayer> createAudioPlayer(const Sett
     options.outputChannelCount = settings.outputChannels;
     options.inputChannelCount = settings.inputChannels;
     options.outputDeviceID = preferredDeviceID;
+
+    // Filter MIDI devices for the actual player too
+    options.shouldOpenMIDIInput = [](const std::string& name) {
+        // Only open Raspberry Pi Pico MIDI
+        return name.find("Pico") != std::string::npos ||
+               name.find("Raspberry Pi") != std::string::npos;
+    };
+
+    options.shouldOpenMIDIOutput = [](const std::string& name) {
+        return false; // No MIDI output needed
+    };
 
     DEBUG_PRINT("Creating final audio player with options");
     auto player = std::make_unique<choc::audio::io::RtAudioMIDIPlayer>(options, logMessage);
@@ -297,7 +320,17 @@ int main()
 
     DEBUG_PRINT("Entering main playback loop");
     while (audioFilePlayer->isStillPlaying()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+
+
+
+        if (udpSender->send("I'm Alive")) {
+            std::cout << "UDP message sent: \"" << "I'm Alive" << "\" to "
+                      << settings.udpAddress << ":" << settings.udpPort << std::endl;
+        } else {
+            std::cout << "Failed to send UDP message" << std::endl;
+        }
+
 
         // Check for loop detection and send UDP message
         if (udpSender && audioFilePlayer->getLoopPlaybackDetected()) {

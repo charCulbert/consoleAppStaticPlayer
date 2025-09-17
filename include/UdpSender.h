@@ -63,6 +63,16 @@ public:
             return false;
         }
 
+        // --- START: ADD THIS SECTION ---
+        // Allow broadcasting
+        int broadcastEnable = 1;
+        if (setsockopt(sock_fd_, SOL_SOCKET, SO_BROADCAST, &broadcastEnable, sizeof(broadcastEnable)) < 0) {
+            perror("setsockopt (SO_BROADCAST) failed");
+            closeSocket(); // Clean up on failure
+            return false;
+        }
+        // --- END: ADD THIS SECTION ---
+
         // Zero out the address structure and set family, port, and IP
         memset(&dest_addr_, 0, sizeof(dest_addr_));
         dest_addr_.sin_family = AF_INET;
