@@ -4,6 +4,10 @@
 #include <filesystem>
 #include <iomanip>
 #include <algorithm>
+#include <signal.h>
+#include <execinfo.h>
+#include <cstdlib>
+#include <unistd.h>
 
 #ifdef __linux__
     #include <unistd.h>
@@ -19,27 +23,46 @@
 #include "BufferedAudioFilePlayer.h"
 #include "UdpSender.h"
 
+// Signal handler for debugging segfaults
+void signal_handler(int sig) {
+    void *array[20];
+    size_t size;
+
+    std::cerr << "Error: signal " << sig << " caught" << std::endl;
+
+    // Get void*'s for all entries on the stack
+    size = backtrace(array, 20);
+
+    // Print out all the frames to stderr
+    std::cerr << "Stack trace:" << std::endl;
+    backtrace_symbols_fd(array, size, STDERR_FILENO);
+
+    exit(1);
+}
+
+#define DEBUG_PRINT(msg) do { \
+    std::cout << "[DEBUG " << __FILE__ << ":" << __LINE__ << "] " << msg << std::endl; \
+    std::cout.flush(); \
+} while(0)
+
 struct Settings {
     int sampleRate = 48000;
     int blockSize = 64;
     int outputChannels = 6;
     int inputChannels = 0;
-    std::string audioFilePath = "../test_6ch.wav"; // Use the sine wave file for testing!
-    std::string preferredAudioInterface = ""; // Empty = use default, otherwise search for matching interface name
+    std::string audioFilePath = "../test_6ch.wav";
+    std::string preferredAudioInterface = "";
 
-    // UDP messaging settings
     bool udpEnabled = true;
-    std::string udpAddress = "255.255.255.255"; // Broadcast by default
+    std::string udpAddress = "255.255.255.255";
     int udpPort = 8080;
     std::string udpMessage = "LOOP";
 };
 
 std::string getConfigFilePath() {
 #ifdef __linux__
-    // For Yocto/Linux: use /var/lib/consoleAudioPlayer/ for writable config
     const std::string configDir = "/var/lib/consoleAudioPlayer";
 
-    // Create directory if it doesn't exist
     try {
         if (!std::filesystem::exists(configDir)) {
             std::filesystem::create_directories(configDir);
@@ -52,19 +75,23 @@ std::string getConfigFilePath() {
 
     return configDir + "/consoleAudioPlayer.config.json";
 #else
-    // For macOS/Windows: use current working directory
     return "consoleAudioPlayer.config.json";
 #endif
 }
 
 Settings loadSettings() {
+    DEBUG_PRINT("Loading settings...");
     Settings settings;
     const std::string settingsFile = getConfigFilePath();
 
     try {
         if (std::filesystem::exists(settingsFile)) {
+            DEBUG_PRINT("Settings file exists: " << settingsFile);
             auto content = choc::file::loadFileAsString(settingsFile);
+            DEBUG_PRINT("File content loaded, size: " << content.size());
+
             auto json = choc::json::parse(content);
+            DEBUG_PRINT("JSON parsed successfully");
 
             settings.sampleRate     = json["sampleRate"]    .getWithDefault<int>(settings.sampleRate);
             settings.blockSize      = json["blockSize"]     .getWithDefault<int>(settings.blockSize);
@@ -77,6 +104,10 @@ Settings loadSettings() {
             settings.udpAddress     = json["udpAddress"]    .getWithDefault<std::string>(settings.udpAddress);
             settings.udpPort        = json["udpPort"]       .getWithDefault<int>(settings.udpPort);
             settings.udpMessage     = json["udpMessage"]    .getWithDefault<std::string>(settings.udpMessage);
+
+            DEBUG_PRINT("Settings loaded successfully");
+        } else {
+            DEBUG_PRINT("Settings file does not exist: " << settingsFile);
         }
     } catch (const std::exception& e) {
         std::cout << "Warning: Could not load settings, using defaults: " << e.what() << std::endl;
@@ -84,13 +115,18 @@ Settings loadSettings() {
     return settings;
 }
 
-
 std::unique_ptr<choc::audio::io::RtAudioMIDIPlayer> createAudioPlayer(const Settings& settings, double preferredSampleRate, auto logMessage) {
-    // Try to find preferred audio interface if specified
+    DEBUG_PRINT("Creating audio player...");
+
     std::string preferredDeviceID;
     if (!settings.preferredAudioInterface.empty()) {
+        DEBUG_PRINT("Looking for preferred interface: " << settings.preferredAudioInterface);
+
         auto player = std::make_unique<choc::audio::io::RtAudioMIDIPlayer>(choc::audio::io::AudioDeviceOptions{}, logMessage);
+        DEBUG_PRINT("Created temporary player for device enumeration");
+
         auto devices = player->getAvailableOutputDevices();
+        DEBUG_PRINT("Got " << devices.size() << " available output devices");
 
         std::cout << "\nSearching for audio interface containing: \"" << settings.preferredAudioInterface << "\"" << std::endl;
         std::cout << "Available output devices:" << std::endl;
@@ -98,7 +134,6 @@ std::unique_ptr<choc::audio::io::RtAudioMIDIPlayer> createAudioPlayer(const Sett
         for (const auto& device : devices) {
             std::cout << "  - " << device.name << " (ID: " << device.deviceID << ")" << std::endl;
 
-            // Case-insensitive search for the preferred name in device name
             std::string deviceNameLower = device.name;
             std::string preferredLower = settings.preferredAudioInterface;
             std::transform(deviceNameLower.begin(), deviceNameLower.end(), deviceNameLower.begin(), ::tolower);
@@ -116,17 +151,18 @@ std::unique_ptr<choc::audio::io::RtAudioMIDIPlayer> createAudioPlayer(const Sett
         }
     }
 
-    // Set up audio device options
+    DEBUG_PRINT("Setting up audio device options");
     choc::audio::io::AudioDeviceOptions options;
     options.sampleRate = preferredSampleRate;
     options.blockSize = settings.blockSize;
     options.outputChannelCount = settings.outputChannels;
     options.inputChannelCount = settings.inputChannels;
-    options.outputDeviceID = preferredDeviceID; // Use found device or empty for default
+    options.outputDeviceID = preferredDeviceID;
 
+    DEBUG_PRINT("Creating final audio player with options");
     auto player = std::make_unique<choc::audio::io::RtAudioMIDIPlayer>(options, logMessage);
+    DEBUG_PRINT("Audio player created");
 
-    // Check if we actually got the preferred rate (not just no error)
     bool gotPreferredRate = player->getLastError().empty() &&
                            std::abs(player->options.sampleRate - preferredSampleRate) < 0.1;
 
@@ -134,19 +170,22 @@ std::unique_ptr<choc::audio::io::RtAudioMIDIPlayer> createAudioPlayer(const Sett
         std::cout << "Device doesn't support " << preferredSampleRate << " Hz (got "
                   << player->options.sampleRate << " Hz), trying " << settings.sampleRate << " Hz..." << std::endl;
 
-        // Try fallback sample rate
         options.sampleRate = settings.sampleRate;
+        DEBUG_PRINT("Retrying with fallback sample rate");
         player = std::make_unique<choc::audio::io::RtAudioMIDIPlayer>(options, logMessage);
         if (!player->getLastError().empty()) return nullptr;
     }
 
+    DEBUG_PRINT("Audio player setup complete");
     return player;
 }
 
 double getAudioFileSampleRate(const std::string& filePath) {
+    DEBUG_PRINT("Getting audio file sample rate for: " << filePath);
     try {
         auto fileStream = std::make_shared<std::ifstream>(filePath, std::ios::binary);
         if (!fileStream || !fileStream->is_open()) {
+            DEBUG_PRINT("Could not open file");
             return 0.0;
         }
 
@@ -155,10 +194,13 @@ double getAudioFileSampleRate(const std::string& filePath) {
 
         auto fileReader = formatList.createReader(fileStream);
         if (!fileReader) {
+            DEBUG_PRINT("Could not create file reader");
             return 0.0;
         }
 
-        return fileReader->getProperties().sampleRate;
+        double rate = fileReader->getProperties().sampleRate;
+        DEBUG_PRINT("File sample rate: " << rate);
+        return rate;
     } catch (const std::exception& e) {
         std::cout << "Warning: Could not read file sample rate: " << e.what() << std::endl;
         return 0.0;
@@ -167,6 +209,12 @@ double getAudioFileSampleRate(const std::string& filePath) {
 
 int main()
 {
+    // Install signal handlers for debugging
+    signal(SIGSEGV, signal_handler);
+    signal(SIGABRT, signal_handler);
+
+    DEBUG_PRINT("Starting CHOC Audio File Player");
+
     std::cout << "CHOC Audio File Player Example" << std::endl;
     std::cout << "==============================" << std::endl;
 
@@ -178,14 +226,18 @@ int main()
     std::cout << "  Output channels: " << settings.outputChannels << std::endl;
     std::cout << "  Audio file path: " << settings.audioFilePath << std::endl << std::endl;
 
-    auto logMessage = [] (const std::string& message) { std::cout << "[Audio] " << message << std::endl; };
+    auto logMessage = [] (const std::string& message) {
+        std::cout << "[Audio] " << message << std::endl;
+        std::cout.flush();
+    };
 
     if (!std::filesystem::exists(settings.audioFilePath)) {
         std::cerr << "Error: Audio file not found at " << settings.audioFilePath << std::endl;
         return 1;
     }
 
-    // Get the file's sample rate to try matching the audio device
+    DEBUG_PRINT("Audio file exists");
+
     double fileSampleRate = getAudioFileSampleRate(settings.audioFilePath);
     double preferredSampleRate = (fileSampleRate > 0) ? fileSampleRate : settings.sampleRate;
 
@@ -194,6 +246,7 @@ int main()
 
     std::unique_ptr<choc::audio::io::RtAudioMIDIPlayer> player;
     for (int retryCount = 0; ; ++retryCount) {
+        DEBUG_PRINT("Audio player creation attempt " << retryCount);
         player = createAudioPlayer(settings, preferredSampleRate, logMessage);
         if (player) break;
         if (retryCount >= 5) {
@@ -209,28 +262,40 @@ int main()
     std::cout << "  Actual Block size: " << player->options.blockSize << " samples" << std::endl;
     std::cout << "  Actual Output channels: " << player->options.outputChannelCount << std::endl << std::endl;
 
+    DEBUG_PRINT("Creating BufferedAudioFilePlayer");
     auto audioFilePlayer = std::make_unique<BufferedAudioFilePlayer>(settings.audioFilePath, player->options.sampleRate);
+    DEBUG_PRINT("BufferedAudioFilePlayer created");
 
     if (!audioFilePlayer->isLoaded()) {
         std::cerr << "Error loading audio file: " << audioFilePlayer->getErrorMessage() << std::endl;
         return 1;
     }
 
+    DEBUG_PRINT("Audio file loaded successfully");
+
     // Pre-fill buffer before starting audio callbacks
+    DEBUG_PRINT("Starting playback");
     audioFilePlayer->startPlayback();
+    DEBUG_PRINT("Playback started");
 
     // Setup UDP sender if enabled
     std::unique_ptr<UdpSender> udpSender;
     if (settings.udpEnabled) {
+        DEBUG_PRINT("Creating UDP sender");
         udpSender = std::make_unique<UdpSender>(settings.udpAddress, settings.udpPort);
         std::cout << "UDP messaging enabled - target: " << settings.udpAddress << ":" << settings.udpPort
                   << " message: \"" << settings.udpMessage << "\"" << std::endl;
+        DEBUG_PRINT("UDP sender created");
     }
 
     std::cout << "Adding audio callback..." << std::endl;
+    DEBUG_PRINT("About to add callback");
     player->addCallback(*audioFilePlayer);
+    DEBUG_PRINT("Callback added");
+
     std::cout << "Playing file: " << settings.audioFilePath << "..." << std::endl;
 
+    DEBUG_PRINT("Entering main playback loop");
     while (audioFilePlayer->isStillPlaying()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
@@ -254,19 +319,13 @@ int main()
             std::cout << "Buffer: " << used << "/" << total << " ("
                      << std::fixed << std::setprecision(1) << percentage << "%)" << std::endl;
         }
-
-        // // Add timeout for testing
-        // static auto startTime = std::chrono::steady_clock::now();
-        // auto elapsed = std::chrono::steady_clock::now() - startTime;
-        // if (elapsed > std::chrono::seconds(15)) {
-        //     std::cout << "Test timeout reached, stopping..." << std::endl;
-        //     break;
-        // }
     }
 
     std::cout << "\nPlayback finished." << std::endl;
 
+    DEBUG_PRINT("Removing callback");
     player->removeCallback(*audioFilePlayer);
+    DEBUG_PRINT("Program ending normally");
 
     return 0;
 }
