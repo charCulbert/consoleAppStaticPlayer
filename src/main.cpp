@@ -25,6 +25,7 @@
 #include "choc/audio/choc_AudioFileFormat_WAV.h"
 #include "BufferedAudioFilePlayer.h"
 #include "UdpSender.h"
+#include "JackTransportController.h"
 
 // Signal handler for debugging segfaults
 void signal_handler(int sig) {
@@ -98,23 +99,25 @@ struct Settings {
 };
 
 std::string getConfigFilePath() {
-#ifdef __linux__
-    const std::string configDir = "/var/lib/consoleSyncedPlayer";
+    const std::string configName = "consoleAudioPlayer.config.json";
 
-    try {
-        if (!std::filesystem::exists(configDir)) {
-            std::filesystem::create_directories(configDir);
+    // Priority order: /var/lib/consoleSyncedPlayer/ -> ../ -> ./
+    std::vector<std::string> searchPaths = {
+#ifdef __linux__
+        "/var/lib/consoleSyncedPlayer/" + configName,
+#endif
+        "../" + configName,
+        configName
+    };
+
+    for (const auto& path : searchPaths) {
+        if (std::filesystem::exists(path)) {
+            return path;
         }
-    } catch (const std::exception& e) {
-        std::cerr << "Warning: Could not create config directory " << configDir
-                  << ", falling back to current directory: " << e.what() << std::endl;
-        return "consoleAudioPlayer.config.json";
     }
 
-    return configDir + "/consoleAudioPlayer.config.json";
-#else
-    return "consoleAudioPlayer.config.json";
-#endif
+    // If none exist, return the first path (will use defaults)
+    return searchPaths[0];
 }
 
 Settings loadSettings() {
@@ -339,38 +342,19 @@ int main()
     audioFilePlayer->startPlayback();
     DEBUG_PRINT("Playback started");
 
-    // Setup UDP sender if enabled
-    std::unique_ptr<UdpSender> udpSender;
-    std::atomic<bool> syncThreadRunning{false};
-    std::thread syncSenderThread;
+    // Setup JACK Transport for sample-accurate sync
+    DEBUG_PRINT("Creating JACK Transport controller");
+    auto jackTransport = std::make_unique<JackTransportController>("consoleAudioPlayer",
+                                                                     player->options.sampleRate);
 
-    if (settings.udpEnabled) {
-        DEBUG_PRINT("Creating UDP sender");
-        udpSender = std::make_unique<UdpSender>(settings.udpAddress, settings.udpPort);
-        std::cout << "UDP messaging enabled - target: " << settings.udpAddress << ":" << settings.udpPort
-                  << " message: \"" << settings.udpMessage << "\"" << std::endl;
-        DEBUG_PRINT("UDP sender created");
-
-        // Start dedicated 1kHz sync sender thread (audio-clock driven, non-blocking)
-        syncThreadRunning = true;
-        syncSenderThread = std::thread([&]() {
-            DEBUG_PRINT("Sync sender thread started at 1kHz");
-            while (syncThreadRunning.load(std::memory_order_relaxed)) {
-                // Read audio position (lock-free atomic read - fast!)
-                double position = audioFilePlayer->getCurrentAudioPosition();
-
-                // Send SYNC message with current audio timestamp
-                std::string syncMsg = "SYNC " + std::to_string(position);
-                udpSender->send(syncMsg);
-
-                // 1kHz = 1ms interval
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-            DEBUG_PRINT("Sync sender thread stopped");
-        });
-
-        std::cout << "Audio clock sync: broadcasting at 1kHz (1ms intervals)" << std::endl;
+    if (!jackTransport->isInitialized()) {
+        std::cerr << "Warning: Failed to initialize JACK Transport: "
+                  << jackTransport->getErrorMessage() << std::endl;
+        std::cerr << "Make sure JACK server is running (try: jackd -d alsa -r 48000)" << std::endl;
+        return 1;
     }
+
+    std::cout << "JACK Transport initialized - sample-accurate sync enabled" << std::endl;
 
     std::cout << "Adding audio callback..." << std::endl;
     DEBUG_PRINT("About to add callback");
@@ -381,13 +365,6 @@ int main()
 
     // Setup keyboard input
     auto termState = setupNonBlockingInput();
-
-    // Send initial PLAY command
-    if (udpSender) {
-        if (udpSender->send("PLAY")) {
-            std::cout << "UDP: Sent PLAY command" << std::endl;
-        }
-    }
 
     std::cout << "\nKeyboard controls:" << std::endl;
     std::cout << "  SPACE - Pause/Resume" << std::endl;
@@ -407,11 +384,9 @@ int main()
                     if (audioFilePlayer->isStillPlaying()) {
                         audioFilePlayer->pause();
                         std::cout << "⏸  Paused" << std::endl;
-                        if (udpSender) udpSender->send("PAUSE");
                     } else {
                         audioFilePlayer->play();
                         std::cout << "▶  Playing" << std::endl;
-                        if (udpSender) udpSender->send("PLAY");
                     }
                     break;
 
@@ -419,7 +394,6 @@ int main()
                 case 'S':
                     audioFilePlayer->stop();
                     std::cout << "⏹  Stopped" << std::endl;
-                    if (udpSender) udpSender->send("STOP");
                     break;
 
                 case 'q':
@@ -430,13 +404,13 @@ int main()
             }
         }
 
-        // Check for loop detection and send UDP message
-        if (udpSender && audioFilePlayer->getLoopPlaybackDetected()) {
-            if (udpSender->send("SEEK 0")) {
-                std::cout << "↻  Loop detected - sent SEEK 0 to video player" << std::endl;
-            } else {
-                std::cout << "Failed to send UDP message" << std::endl;
-            }
+        // Update JACK transport position to match current audio playback
+        double currentAudioPosition = audioFilePlayer->getCurrentAudioPosition();
+        jackTransport->updatePosition(currentAudioPosition);
+
+        // Check for loop detection and relocate JACK transport
+        if (audioFilePlayer->getLoopPlaybackDetected()) {
+            jackTransport->seekToStart();
         }
 
         // Monitor buffer health
@@ -453,19 +427,7 @@ int main()
 
     std::cout << "\nPlayback finished." << std::endl;
 
-    // Stop sync sender thread first
-    if (syncThreadRunning.load()) {
-        DEBUG_PRINT("Stopping sync sender thread");
-        syncThreadRunning.store(false, std::memory_order_relaxed);
-        if (syncSenderThread.joinable()) {
-            syncSenderThread.join();
-        }
-    }
-
-    // Send STOP to video player
-    if (udpSender) {
-        udpSender->send("STOP");
-    }
+    // JACK transport controller will be automatically cleaned up via RAII
 
     // Restore terminal
     restoreTerminal(termState);
