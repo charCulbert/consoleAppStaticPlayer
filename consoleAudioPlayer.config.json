@@ -3,10 +3,10 @@
   "blockSize": 64,
   "outputChannels": 6,
   "inputChannels": 0,
-  "audioFilePath": "/home/char/Downloads/Static_Centre_Jean_Cocteau_6ch_10s.wav",
+  "audioFilePath": "/home/char/Downloads/Static_Centre_Jean_Cocteau_6ch.wav",
   "preferredAudioInterface": "",
   "udpEnabled": true,
   "udpAddress": "255.255.255.255",
   "udpPort": 8080,
-  "udpMessage": "HELLO"
+  "udpMessage": "SEEK 0"
 }
