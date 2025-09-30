@@ -46,7 +46,7 @@ JackTransportController::~JackTransportController() {
     }
 }
 
-void JackTransportController::updatePosition(double audioPositionSeconds) {
+void JackTransportController::updatePosition(double audioPositionSeconds, bool isPlaying) {
     if (!client) return;
 
     // Convert audio position to JACK frames
@@ -55,8 +55,12 @@ void JackTransportController::updatePosition(double audioPositionSeconds) {
     // Update transport position
     jack_transport_locate(client, targetFrame);
 
-    // Ensure transport is rolling
-    jack_transport_start(client);
+    // Set transport state to match audio playback state
+    if (isPlaying) {
+        jack_transport_start(client);
+    } else {
+        jack_transport_stop(client);
+    }
 }
 
 void JackTransportController::seekToStart() {
@@ -64,5 +68,21 @@ void JackTransportController::seekToStart() {
 
     // Locate transport to frame 0
     jack_transport_locate(client, 0);
-    DEBUG_PRINT("↻  JACK transport located to frame 0");
+
+    // Stop transport (user pressed stop)
+    jack_transport_stop(client);
+
+    DEBUG_PRINT("⏹  JACK transport reset to frame 0 and stopped");
+}
+
+void JackTransportController::resetToStartAndPlay() {
+    if (!client) return;
+
+    // Locate transport to frame 0
+    jack_transport_locate(client, 0);
+
+    // Restart transport immediately (seamless loop)
+    jack_transport_start(client);
+
+    DEBUG_PRINT("↻  JACK transport looped to frame 0 (playing)");
 }

@@ -12,11 +12,14 @@ public:
     bool isInitialized() const { return client != nullptr; }
     std::string getErrorMessage() const { return errorMessage; }
 
-    // Update JACK transport position based on audio playback (call this frequently!)
-    void updatePosition(double audioPositionSeconds);
+    // Update JACK transport position AND state based on audio playback
+    void updatePosition(double audioPositionSeconds, bool isPlaying);
 
-    // Command JACK transport to seek to frame 0
+    // Command JACK transport to seek to frame 0 and stop (for user stop command)
     void seekToStart();
+
+    // Reset to frame 0 but keep playing (for loop detection)
+    void resetToStartAndPlay();
 
 private:
     jack_client_t* client = nullptr;

@@ -369,6 +369,9 @@ int main()
     std::cout << "\nKeyboard controls:" << std::endl;
     std::cout << "  SPACE - Pause/Resume" << std::endl;
     std::cout << "  S     - Stop and reset to beginning" << std::endl;
+    std::cout << "  F     - Skip forward 10 seconds" << std::endl;
+    std::cout << "  D     - Skip forward 30 seconds" << std::endl;
+    std::cout << "  G     - Skip forward 60 seconds" << std::endl;
     std::cout << "  Q     - Quit" << std::endl << std::endl;
 
     bool running = true;
@@ -394,6 +397,25 @@ int main()
                 case 'S':
                     audioFilePlayer->stop();
                     std::cout << "⏹  Stopped" << std::endl;
+                    jackTransport->seekToStart();  // Immediately update JACK
+                    break;
+
+                case 'f':
+                case 'F':
+                    audioFilePlayer->skipForward(10.0);
+                    std::cout << "⏩  Skipped forward 10s" << std::endl;
+                    break;
+
+                case 'd':
+                case 'D':
+                    audioFilePlayer->skipForward(30.0);
+                    std::cout << "⏩  Skipped forward 30s" << std::endl;
+                    break;
+
+                case 'g':
+                case 'G':
+                    audioFilePlayer->skipForward(60.0);
+                    std::cout << "⏩  Skipped forward 60s" << std::endl;
                     break;
 
                 case 'q':
@@ -404,13 +426,30 @@ int main()
             }
         }
 
-        // Update JACK transport position to match current audio playback
+        // Update JACK transport position AND state to match current audio playback
+        // Only update if position changed significantly (> 10ms) to avoid thrashing JACK
+        static double lastReportedPosition = -1.0;
+        static bool lastReportedPlayState = true;
         double currentAudioPosition = audioFilePlayer->getCurrentAudioPosition();
-        jackTransport->updatePosition(currentAudioPosition);
+        bool currentlyPlaying = audioFilePlayer->isStillPlaying();
+
+        // Always update if position jumped (seek/loop) or play state changed
+        bool positionJumped = fabs(currentAudioPosition - lastReportedPosition) > 0.01;
+        bool stateChanged = (currentlyPlaying != lastReportedPlayState);
+
+        if (positionJumped || stateChanged || lastReportedPosition < 0) {
+            jackTransport->updatePosition(currentAudioPosition, currentlyPlaying);
+            lastReportedPosition = currentAudioPosition;
+            lastReportedPlayState = currentlyPlaying;
+        }
 
         // Check for loop detection and relocate JACK transport
         if (audioFilePlayer->getLoopPlaybackDetected()) {
-            jackTransport->seekToStart();
+            // CRITICAL: Reset audio position tracking FIRST, before updating JACK
+            // This ensures the next loop iteration doesn't overwrite JACK with stale position
+            audioFilePlayer->resetAudioPosition();
+            jackTransport->resetToStartAndPlay();  // Loop: reset to 0 but keep playing
+            lastReportedPosition = 0.0;  // Reset tracking
         }
 
         // Monitor buffer health

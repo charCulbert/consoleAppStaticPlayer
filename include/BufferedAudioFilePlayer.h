@@ -33,6 +33,7 @@ public:
     void play() { isPlaying = true; }
     void pause() { isPlaying = false; }
     void stop() { isPlaying = false; fileReadPosition = 0; audioBuffer.reset(bufferSize); totalSamplesPlayed = 0; currentAudioPosition = 0.0; }
+    void skipForward(double seconds);  // Skip forward by N seconds
 
     // For monitoring buffer health
     uint32_t getBufferUsedSlots() const { return audioBuffer.getUsedSlots(); }
@@ -40,6 +41,12 @@ public:
 
     // For loop detection and UDP messaging
     std::atomic<bool> getLoopPlaybackDetected() { return loopPlaybackDetected.exchange(false); }
+
+    // Reset position counters to 0 (for loop handling - keeps playing)
+    void resetAudioPosition() {
+        totalSamplesPlayed = 0;
+        currentAudioPosition = 0.0;
+    }
 
     // Audio clock sync - get current playback position (lock-free, safe from any thread)
     double getCurrentAudioPosition() const { return currentAudioPosition.load(std::memory_order_relaxed); }
