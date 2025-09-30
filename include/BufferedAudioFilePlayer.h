@@ -29,6 +29,11 @@ public:
 
     void startPlayback(); // Call this before adding to audio player
 
+    // Playback control
+    void play() { isPlaying = true; }
+    void pause() { isPlaying = false; }
+    void stop() { isPlaying = false; fileReadPosition = 0; audioBuffer.reset(bufferSize); }
+
     // For monitoring buffer health
     uint32_t getBufferUsedSlots() const { return audioBuffer.getUsedSlots(); }
     uint32_t getBufferSize() const { return bufferSize; }

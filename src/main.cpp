@@ -8,6 +8,9 @@
 #include <execinfo.h>
 #include <cstdlib>
 #include <unistd.h>
+#include <termios.h>
+#include <fcntl.h>
+#include <sys/select.h>
 
 #ifdef __linux__
     #include <unistd.h>
@@ -40,6 +43,41 @@ void signal_handler(int sig) {
     exit(1);
 }
 
+// Terminal setup for non-blocking keyboard input
+struct TerminalState {
+    termios oldSettings;
+    bool isSetup = false;
+};
+
+TerminalState setupNonBlockingInput() {
+    TerminalState state;
+    tcgetattr(STDIN_FILENO, &state.oldSettings);
+
+    termios newSettings = state.oldSettings;
+    newSettings.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &newSettings);
+
+    int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+    fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
+
+    state.isSetup = true;
+    return state;
+}
+
+void restoreTerminal(const TerminalState& state) {
+    if (state.isSetup) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &state.oldSettings);
+        int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+        fcntl(STDIN_FILENO, F_SETFL, flags & ~O_NONBLOCK);
+    }
+}
+
+char getKeyPress() {
+    char c = 0;
+    read(STDIN_FILENO, &c, 1);
+    return c;
+}
+
 #define DEBUG_PRINT(msg) do { \
     std::cout << "[DEBUG " << __FILE__ << ":" << __LINE__ << "] " << msg << std::endl; \
     std::cout.flush(); \
@@ -61,7 +99,7 @@ struct Settings {
 
 std::string getConfigFilePath() {
 #ifdef __linux__
-    const std::string configDir = "/var/lib/consoleAudioPlayer";
+    const std::string configDir = "/var/lib/consoleSyncedPlayer";
 
     try {
         if (!std::filesystem::exists(configDir)) {
@@ -318,25 +356,61 @@ int main()
 
     std::cout << "Playing file: " << settings.audioFilePath << "..." << std::endl;
 
-    DEBUG_PRINT("Entering main playback loop");
-    while (audioFilePlayer->isStillPlaying()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    // Setup keyboard input
+    auto termState = setupNonBlockingInput();
 
-
-
-        if (udpSender->send("I'm Alive")) {
-            std::cout << "UDP message sent: \"" << "I'm Alive" << "\" to "
-                      << settings.udpAddress << ":" << settings.udpPort << std::endl;
-        } else {
-            std::cout << "Failed to send UDP message" << std::endl;
+    // Send initial PLAY command
+    if (udpSender) {
+        if (udpSender->send("PLAY")) {
+            std::cout << "UDP: Sent PLAY command" << std::endl;
         }
+    }
 
+    std::cout << "\nKeyboard controls:" << std::endl;
+    std::cout << "  SPACE - Pause/Resume" << std::endl;
+    std::cout << "  S     - Stop and reset to beginning" << std::endl;
+    std::cout << "  Q     - Quit" << std::endl << std::endl;
+
+    bool running = true;
+    DEBUG_PRINT("Entering main playback loop");
+    while (running) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+        // Check for keyboard input
+        char key = getKeyPress();
+        if (key != 0) {
+            switch (key) {
+                case ' ': // Space - toggle pause/play
+                    if (audioFilePlayer->isStillPlaying()) {
+                        audioFilePlayer->pause();
+                        std::cout << "⏸  Paused" << std::endl;
+                        if (udpSender) udpSender->send("PAUSE");
+                    } else {
+                        audioFilePlayer->play();
+                        std::cout << "▶  Playing" << std::endl;
+                        if (udpSender) udpSender->send("PLAY");
+                    }
+                    break;
+
+                case 's':
+                case 'S':
+                    audioFilePlayer->stop();
+                    std::cout << "⏹  Stopped" << std::endl;
+                    if (udpSender) udpSender->send("STOP");
+                    break;
+
+                case 'q':
+                case 'Q':
+                    std::cout << "Quitting..." << std::endl;
+                    running = false;
+                    break;
+            }
+        }
 
         // Check for loop detection and send UDP message
         if (udpSender && audioFilePlayer->getLoopPlaybackDetected()) {
-            if (udpSender->send(settings.udpMessage)) {
-                std::cout << "UDP message sent: \"" << settings.udpMessage << "\" to "
-                          << settings.udpAddress << ":" << settings.udpPort << std::endl;
+            if (udpSender->send("SEEK 0")) {
+                std::cout << "↻  Loop detected - sent SEEK 0 to video player" << std::endl;
             } else {
                 std::cout << "Failed to send UDP message" << std::endl;
             }
@@ -344,7 +418,7 @@ int main()
 
         // Monitor buffer health
         static int reportCount = 0;
-        if (reportCount++ % 20 == 0) // Every 2 seconds
+        if (reportCount++ % 10000 == 0) // Every 10 seconds
         {
             uint32_t used = audioFilePlayer->getBufferUsedSlots();
             uint32_t total = audioFilePlayer->getBufferSize();
@@ -355,6 +429,14 @@ int main()
     }
 
     std::cout << "\nPlayback finished." << std::endl;
+
+    // Send STOP to video player
+    if (udpSender) {
+        udpSender->send("STOP");
+    }
+
+    // Restore terminal
+    restoreTerminal(termState);
 
     DEBUG_PRINT("Removing callback");
     player->removeCallback(*audioFilePlayer);

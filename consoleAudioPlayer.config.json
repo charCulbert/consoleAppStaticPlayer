@@ -3,7 +3,7 @@
   "blockSize": 64,
   "outputChannels": 6,
   "inputChannels": 0,
-  "audioFilePath": "../test_6ch.wav",
+  "audioFilePath": "/home/char/Downloads/Static_Centre_Jean_Cocteau_6ch_10s.wav",
   "preferredAudioInterface": "",
   "udpEnabled": true,
   "udpAddress": "255.255.255.255",
