@@ -416,4 +416,9 @@ void BufferedAudioFilePlayer::processSubBlock(const choc::audio::AudioMIDIBlockD
                 output.getSample(channel, frame) += sample;
         }
     }
+
+    // Update audio clock position (lock-free atomic write - safe for real-time thread)
+    uint64_t samplesPlayed = totalSamplesPlayed.fetch_add(numFrames, std::memory_order_relaxed);
+    double positionSeconds = (double)(samplesPlayed + numFrames) / outputSampleRate;
+    currentAudioPosition.store(positionSeconds, std::memory_order_relaxed);
 }

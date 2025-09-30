@@ -32,7 +32,7 @@ public:
     // Playback control
     void play() { isPlaying = true; }
     void pause() { isPlaying = false; }
-    void stop() { isPlaying = false; fileReadPosition = 0; audioBuffer.reset(bufferSize); }
+    void stop() { isPlaying = false; fileReadPosition = 0; audioBuffer.reset(bufferSize); totalSamplesPlayed = 0; currentAudioPosition = 0.0; }
 
     // For monitoring buffer health
     uint32_t getBufferUsedSlots() const { return audioBuffer.getUsedSlots(); }
@@ -40,6 +40,10 @@ public:
 
     // For loop detection and UDP messaging
     std::atomic<bool> getLoopPlaybackDetected() { return loopPlaybackDetected.exchange(false); }
+
+    // Audio clock sync - get current playback position (lock-free, safe from any thread)
+    double getCurrentAudioPosition() const { return currentAudioPosition.load(std::memory_order_relaxed); }
+    uint64_t getTotalSamplesPlayed() const { return totalSamplesPlayed.load(std::memory_order_relaxed); }
 
 private:
     std::string filePath;
@@ -71,6 +75,10 @@ private:
     std::atomic<uint32_t> loopSequenceNumber{0};
     std::atomic<uint32_t> samplesUntilLoopAudible{0};
     std::atomic<bool> loopPlaybackDetected{false};
+
+    // Audio clock synchronization - lock-free for real-time thread safety
+    std::atomic<double> currentAudioPosition{0.0};
+    std::atomic<uint64_t> totalSamplesPlayed{0};
 
     bool loadAudioFile();
     void backgroundLoadingTask();

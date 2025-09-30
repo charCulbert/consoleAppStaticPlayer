@@ -341,12 +341,35 @@ int main()
 
     // Setup UDP sender if enabled
     std::unique_ptr<UdpSender> udpSender;
+    std::atomic<bool> syncThreadRunning{false};
+    std::thread syncSenderThread;
+
     if (settings.udpEnabled) {
         DEBUG_PRINT("Creating UDP sender");
         udpSender = std::make_unique<UdpSender>(settings.udpAddress, settings.udpPort);
         std::cout << "UDP messaging enabled - target: " << settings.udpAddress << ":" << settings.udpPort
                   << " message: \"" << settings.udpMessage << "\"" << std::endl;
         DEBUG_PRINT("UDP sender created");
+
+        // Start dedicated 1kHz sync sender thread (audio-clock driven, non-blocking)
+        syncThreadRunning = true;
+        syncSenderThread = std::thread([&]() {
+            DEBUG_PRINT("Sync sender thread started at 1kHz");
+            while (syncThreadRunning.load(std::memory_order_relaxed)) {
+                // Read audio position (lock-free atomic read - fast!)
+                double position = audioFilePlayer->getCurrentAudioPosition();
+
+                // Send SYNC message with current audio timestamp
+                std::string syncMsg = "SYNC " + std::to_string(position);
+                udpSender->send(syncMsg);
+
+                // 1kHz = 1ms interval
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            DEBUG_PRINT("Sync sender thread stopped");
+        });
+
+        std::cout << "Audio clock sync: broadcasting at 1kHz (1ms intervals)" << std::endl;
     }
 
     std::cout << "Adding audio callback..." << std::endl;
@@ -429,6 +452,15 @@ int main()
     }
 
     std::cout << "\nPlayback finished." << std::endl;
+
+    // Stop sync sender thread first
+    if (syncThreadRunning.load()) {
+        DEBUG_PRINT("Stopping sync sender thread");
+        syncThreadRunning.store(false, std::memory_order_relaxed);
+        if (syncSenderThread.joinable()) {
+            syncSenderThread.join();
+        }
+    }
 
     // Send STOP to video player
     if (udpSender) {
