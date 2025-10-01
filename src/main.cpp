@@ -18,13 +18,14 @@
     #include <pwd.h>
 #endif
 
-#include "choc/audio/io/choc_RtAudioPlayer.h"
-#include "choc/gui/choc_MessageLoop.h"
 #include "choc/text/choc_JSON.h"
 #include "choc/text/choc_Files.h"
 #include "choc/audio/choc_AudioFileFormat_WAV.h"
+#include "choc/audio/choc_AudioSampleData.h"
 #include "BufferedAudioFilePlayer.h"
-#include "UdpSender.h"
+#include <jack/jack.h>
+#include <jack/transport.h>
+#include <jack/midiport.h>
 
 // Signal handler for debugging segfaults
 void signal_handler(int sig) {
@@ -98,38 +99,35 @@ struct Settings {
 };
 
 std::string getConfigFilePath() {
-#ifdef __linux__
-    const std::string configDir = "/var/lib/consoleSyncedPlayer";
+    const std::string configName = "consoleAudioPlayer.config.json";
 
-    try {
-        if (!std::filesystem::exists(configDir)) {
-            std::filesystem::create_directories(configDir);
+    // Priority order: /var/lib/consolePlayers/ -> ../ -> ./
+    std::vector<std::string> searchPaths = {
+#ifdef __linux__
+        "/var/lib/consolePlayers/" + configName,
+#endif
+        "../" + configName,
+        configName
+    };
+
+    for (const auto& path : searchPaths) {
+        if (std::filesystem::exists(path)) {
+            return path;
         }
-    } catch (const std::exception& e) {
-        std::cerr << "Warning: Could not create config directory " << configDir
-                  << ", falling back to current directory: " << e.what() << std::endl;
-        return "consoleAudioPlayer.config.json";
     }
 
-    return configDir + "/consoleAudioPlayer.config.json";
-#else
-    return "consoleAudioPlayer.config.json";
-#endif
+    // If none exist, return the first path (will use defaults)
+    return searchPaths[0];
 }
 
 Settings loadSettings() {
-    DEBUG_PRINT("Loading settings...");
     Settings settings;
     const std::string settingsFile = getConfigFilePath();
 
     try {
         if (std::filesystem::exists(settingsFile)) {
-            DEBUG_PRINT("Settings file exists: " << settingsFile);
             auto content = choc::file::loadFileAsString(settingsFile);
-            DEBUG_PRINT("File content loaded, size: " << content.size());
-
             auto json = choc::json::parse(content);
-            DEBUG_PRINT("JSON parsed successfully");
 
             settings.sampleRate     = json["sampleRate"]    .getWithDefault<int>(settings.sampleRate);
             settings.blockSize      = json["blockSize"]     .getWithDefault<int>(settings.blockSize);
@@ -143,9 +141,6 @@ Settings loadSettings() {
             settings.udpPort        = json["udpPort"]       .getWithDefault<int>(settings.udpPort);
             settings.udpMessage     = json["udpMessage"]    .getWithDefault<std::string>(settings.udpMessage);
 
-            DEBUG_PRINT("Settings loaded successfully");
-        } else {
-            DEBUG_PRINT("Settings file does not exist: " << settingsFile);
         }
     } catch (const std::exception& e) {
         std::cout << "Warning: Could not load settings, using defaults: " << e.what() << std::endl;
@@ -153,100 +148,10 @@ Settings loadSettings() {
     return settings;
 }
 
-std::unique_ptr<choc::audio::io::RtAudioMIDIPlayer> createAudioPlayer(const Settings& settings, double preferredSampleRate, auto logMessage) {
-    DEBUG_PRINT("Creating audio player...");
-
-    std::string preferredDeviceID;
-    if (!settings.preferredAudioInterface.empty()) {
-        DEBUG_PRINT("Looking for preferred interface: " << settings.preferredAudioInterface);
-
-        // First pass: enumerate with MIDI filtering to avoid memory exhaustion
-        choc::audio::io::AudioDeviceOptions enumOptions;
-
-        // Only allow the Raspberry Pi Pico MIDI device
-        enumOptions.shouldOpenMIDIInput = [](const std::string& name) {
-            return name.find("Pico") != std::string::npos ||
-                   name.find("Raspberry Pi") != std::string::npos;
-        };
-        enumOptions.shouldOpenMIDIOutput = [](const std::string& name) {
-            return false; // Don't open any MIDI outputs for now
-        };
-
-        auto player = std::make_unique<choc::audio::io::RtAudioMIDIPlayer>(enumOptions, logMessage);
-        DEBUG_PRINT("Created temporary player for device enumeration");
-
-        auto devices = player->getAvailableOutputDevices();
-        DEBUG_PRINT("Got " << devices.size() << " available output devices");
-
-        std::cout << "\nSearching for audio interface containing: \"" << settings.preferredAudioInterface << "\"" << std::endl;
-        std::cout << "Available output devices:" << std::endl;
-
-        for (const auto& device : devices) {
-            std::cout << "  - " << device.name << " (ID: " << device.deviceID << ")" << std::endl;
-
-            std::string deviceNameLower = device.name;
-            std::string preferredLower = settings.preferredAudioInterface;
-            std::transform(deviceNameLower.begin(), deviceNameLower.end(), deviceNameLower.begin(), ::tolower);
-            std::transform(preferredLower.begin(), preferredLower.end(), preferredLower.begin(), ::tolower);
-
-            if (deviceNameLower.find(preferredLower) != std::string::npos) {
-                preferredDeviceID = device.deviceID;
-                std::cout << "  -> Found matching device: " << device.name << std::endl;
-                break;
-            }
-        }
-
-        if (preferredDeviceID.empty()) {
-            std::cout << "  -> No matching device found, using default" << std::endl;
-        }
-    }
-
-    DEBUG_PRINT("Setting up audio device options");
-    choc::audio::io::AudioDeviceOptions options;
-    options.sampleRate = preferredSampleRate;
-    options.blockSize = settings.blockSize;
-    options.outputChannelCount = settings.outputChannels;
-    options.inputChannelCount = settings.inputChannels;
-    options.outputDeviceID = preferredDeviceID;
-
-    // Filter MIDI devices for the actual player too
-    options.shouldOpenMIDIInput = [](const std::string& name) {
-        // Only open Raspberry Pi Pico MIDI
-        return name.find("Pico") != std::string::npos ||
-               name.find("Raspberry Pi") != std::string::npos;
-    };
-
-    options.shouldOpenMIDIOutput = [](const std::string& name) {
-        return false; // No MIDI output needed
-    };
-
-    DEBUG_PRINT("Creating final audio player with options");
-    auto player = std::make_unique<choc::audio::io::RtAudioMIDIPlayer>(options, logMessage);
-    DEBUG_PRINT("Audio player created");
-
-    bool gotPreferredRate = player->getLastError().empty() &&
-                           std::abs(player->options.sampleRate - preferredSampleRate) < 0.1;
-
-    if (!gotPreferredRate && preferredSampleRate != settings.sampleRate) {
-        std::cout << "Device doesn't support " << preferredSampleRate << " Hz (got "
-                  << player->options.sampleRate << " Hz), trying " << settings.sampleRate << " Hz..." << std::endl;
-
-        options.sampleRate = settings.sampleRate;
-        DEBUG_PRINT("Retrying with fallback sample rate");
-        player = std::make_unique<choc::audio::io::RtAudioMIDIPlayer>(options, logMessage);
-        if (!player->getLastError().empty()) return nullptr;
-    }
-
-    DEBUG_PRINT("Audio player setup complete");
-    return player;
-}
-
 double getAudioFileSampleRate(const std::string& filePath) {
-    DEBUG_PRINT("Getting audio file sample rate for: " << filePath);
     try {
         auto fileStream = std::make_shared<std::ifstream>(filePath, std::ios::binary);
         if (!fileStream || !fileStream->is_open()) {
-            DEBUG_PRINT("Could not open file");
             return 0.0;
         }
 
@@ -255,12 +160,10 @@ double getAudioFileSampleRate(const std::string& filePath) {
 
         auto fileReader = formatList.createReader(fileStream);
         if (!fileReader) {
-            DEBUG_PRINT("Could not create file reader");
             return 0.0;
         }
 
         double rate = fileReader->getProperties().sampleRate;
-        DEBUG_PRINT("File sample rate: " << rate);
         return rate;
     } catch (const std::exception& e) {
         std::cout << "Warning: Could not read file sample rate: " << e.what() << std::endl;
@@ -268,13 +171,121 @@ double getAudioFileSampleRate(const std::string& filePath) {
     }
 }
 
+// Global context for JACK callback
+struct JackAudioContext {
+    BufferedAudioFilePlayer* audioPlayer = nullptr;
+    jack_port_t** outputPorts = nullptr;
+    int numOutputChannels = 0;
+    jack_client_t* client = nullptr;
+    uint64_t fileDurationFrames = 0;  // File duration in output sample rate
+    std::atomic<uint64_t> lastKnownPosition{0};  // Cached position from file
+    jack_port_t* midiInputPort = nullptr;  // MIDI input for control
+
+    // Transport control flags (set in audio callback, handled in main thread)
+    std::atomic<bool> requestPlay{false};
+    std::atomic<bool> requestStop{false};
+};
+
+// JACK audio process callback - runs in realtime thread
+int jackProcessCallback(jack_nframes_t nframes, void* arg) {
+    auto* ctx = static_cast<JackAudioContext*>(arg);
+    if (!ctx || !ctx->audioPlayer) return 0;
+
+    // Handle MIDI input (if port exists)
+    if (ctx->midiInputPort) {
+        void* midiBuffer = jack_port_get_buffer(ctx->midiInputPort, nframes);
+        jack_nframes_t eventCount = jack_midi_get_event_count(midiBuffer);
+
+        for (jack_nframes_t i = 0; i < eventCount; i++) {
+            jack_midi_event_t event;
+            if (jack_midi_event_get(&event, midiBuffer, i) == 0) {
+                // Parse MIDI CC messages (status byte 0xB0-0xBF)
+                if (event.size >= 3 && (event.buffer[0] & 0xF0) == 0xB0) {
+                    uint8_t ccNumber = event.buffer[1];
+                    uint8_t ccValue = event.buffer[2];
+                    float normalizedValue = ccValue / 127.0f;
+
+                    // Debug MIDI (disabled - enable if debugging MIDI issues)
+                    // printf("[MIDI] CC%d = %d (%.2f)\n", ccNumber, ccValue, normalizedValue);
+
+                    // Handle CC1, CC2, CC3
+                    switch (ccNumber) {
+                        case 1: // Play
+                            if (normalizedValue > 0.5f) {
+                                ctx->requestPlay.store(true, std::memory_order_release);
+                            }
+                            break;
+                        case 2: // Stop/Pause (toggle behavior)
+                            if (normalizedValue > 0.5f) {
+                                // If playing -> pause, if paused -> stop and reset
+                                if (ctx->audioPlayer->isStillPlaying()) {
+                                    ctx->audioPlayer->pause();
+                                    jack_transport_stop(ctx->client);
+                                } else {
+                                    ctx->requestStop.store(true, std::memory_order_release);
+                                }
+                            }
+                            break;
+                        case 3: // Volume
+                            ctx->audioPlayer->setGain(normalizedValue);
+                            break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Get JACK output buffers (raw float* pointers)
+    float* outputBuffers[ctx->numOutputChannels];
+    for (int ch = 0; ch < ctx->numOutputChannels; ch++) {
+        outputBuffers[ch] = static_cast<float*>(jack_port_get_buffer(ctx->outputPorts[ch], nframes));
+    }
+
+    // Wrap JACK buffers in CHOC's BufferView (zero-copy)
+    auto outputView = choc::buffer::createChannelArrayView(outputBuffers,
+                                                            (choc::buffer::ChannelCount)ctx->numOutputChannels,
+                                                            (choc::buffer::FrameCount)nframes);
+
+    // Call our audio processing
+    ctx->audioPlayer->processBlock(outputView);
+
+    // Cache current position for timebase callback (derived from fileReadPosition)
+    ctx->lastKnownPosition.store(ctx->audioPlayer->getCurrentOutputFrame(), std::memory_order_release);
+
+    return 0;
+}
+
+// JACK timebase callback - called after process callback to update position
+// As timebase master, we write our current audio position to JACK Transport
+void jackTimebaseCallback(jack_transport_state_t state, jack_nframes_t nframes,
+                          jack_position_t *pos, int new_pos, void *arg) {
+    auto* ctx = static_cast<JackAudioContext*>(arg);
+    if (!ctx || !ctx->audioPlayer) return;
+
+    // If stop was requested, force position to 0 and don't update from audio
+    if (ctx->requestStop.load(std::memory_order_acquire)) {
+        pos->frame = 0;
+        pos->valid = (jack_position_bits_t)0;
+        return;
+    }
+
+    // Use cached position (updated by process callback) - safe even during seeks
+    uint64_t currentAudioFrame = ctx->lastKnownPosition.load(std::memory_order_acquire);
+
+    // Auto-wrap at file end
+    if (currentAudioFrame >= ctx->fileDurationFrames) {
+        currentAudioFrame = currentAudioFrame % ctx->fileDurationFrames;
+    }
+
+    pos->frame = currentAudioFrame;  // Write audio position to JACK (master controls timeline)
+    pos->valid = (jack_position_bits_t)0; // We only provide frame count, no BBT/timecode
+}
+
 int main()
 {
     // Install signal handlers for debugging
     signal(SIGSEGV, signal_handler);
     signal(SIGABRT, signal_handler);
-
-    DEBUG_PRINT("Starting CHOC Audio File Player");
 
     std::cout << "CHOC Audio File Player Example" << std::endl;
     std::cout << "==============================" << std::endl;
@@ -297,82 +308,147 @@ int main()
         return 1;
     }
 
-    DEBUG_PRINT("Audio file exists");
-
     double fileSampleRate = getAudioFileSampleRate(settings.audioFilePath);
     double preferredSampleRate = (fileSampleRate > 0) ? fileSampleRate : settings.sampleRate;
 
-    std::cout << "  File sample rate: " << fileSampleRate << " Hz" << std::endl;
-    std::cout << "  Trying to open audio device at: " << preferredSampleRate << " Hz" << std::endl << std::endl;
+    std::cout << "  File sample rate: " << fileSampleRate << " Hz" << std::endl << std::endl;
 
-    std::unique_ptr<choc::audio::io::RtAudioMIDIPlayer> player;
-    for (int retryCount = 0; ; ++retryCount) {
-        DEBUG_PRINT("Audio player creation attempt " << retryCount);
-        player = createAudioPlayer(settings, preferredSampleRate, logMessage);
-        if (player) break;
-        if (retryCount >= 5) {
-            std::cerr << "Failed to connect to audio interface after " << retryCount << " attempts." << std::endl;
-            return 1;
-        }
-        std::cout << "No audio interfaces available. Retrying in 3 seconds..." << std::endl;
-        std::this_thread::sleep_for(std::chrono::seconds(3));
+    // Initialize JACK client
+    jack_status_t jackStatus;
+    jack_client_t* jackClient = jack_client_open("consoleAudioPlayer", JackNullOption, &jackStatus);
+
+    if (!jackClient) {
+        std::cerr << "Failed to open JACK client. Is JACK server running?" << std::endl;
+        std::cerr << "Try: jackd -d alsa -r 48000 -p 256" << std::endl;
+        return 1;
     }
 
-    std::cout << "\nAudio setup complete:" << std::endl;
-    std::cout << "  Actual Sample rate: " << player->options.sampleRate << " Hz" << std::endl;
-    std::cout << "  Actual Block size: " << player->options.blockSize << " samples" << std::endl;
-    std::cout << "  Actual Output channels: " << player->options.outputChannelCount << std::endl << std::endl;
 
-    DEBUG_PRINT("Creating BufferedAudioFilePlayer");
-    auto audioFilePlayer = std::make_unique<BufferedAudioFilePlayer>(settings.audioFilePath, player->options.sampleRate);
-    DEBUG_PRINT("BufferedAudioFilePlayer created");
+    jack_nframes_t jackSampleRate = jack_get_sample_rate(jackClient);
+    jack_nframes_t jackBlockSize = jack_get_buffer_size(jackClient);
+
+    // Create JACK output ports
+    jack_port_t* outputPorts[settings.outputChannels];
+    for (int ch = 0; ch < settings.outputChannels; ch++) {
+        std::string portName = "output_" + std::to_string(ch + 1);
+        outputPorts[ch] = jack_port_register(jackClient, portName.c_str(),
+                                              JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
+        if (!outputPorts[ch]) {
+            std::cerr << "Failed to register JACK output port " << ch << std::endl;
+            jack_client_close(jackClient);
+            return 1;
+        }
+    }
+
+    // Create JACK MIDI input port for control
+    jack_port_t* midiInputPort = jack_port_register(jackClient, "midi_in",
+                                                      JACK_DEFAULT_MIDI_TYPE, JackPortIsInput, 0);
+    if (!midiInputPort) {
+        std::cerr << "Warning: Failed to register JACK MIDI input port (MIDI control disabled)" << std::endl;
+    }
+
+    auto audioFilePlayer = std::make_unique<BufferedAudioFilePlayer>(settings.audioFilePath, jackSampleRate);
 
     if (!audioFilePlayer->isLoaded()) {
         std::cerr << "Error loading audio file: " << audioFilePlayer->getErrorMessage() << std::endl;
         return 1;
     }
 
-    DEBUG_PRINT("Audio file loaded successfully");
-
     // Pre-fill buffer before starting audio callbacks
-    DEBUG_PRINT("Starting playback");
     audioFilePlayer->startPlayback();
-    DEBUG_PRINT("Playback started");
 
-    // Setup UDP sender if enabled
-    std::unique_ptr<UdpSender> udpSender;
-    if (settings.udpEnabled) {
-        DEBUG_PRINT("Creating UDP sender");
-        udpSender = std::make_unique<UdpSender>(settings.udpAddress, settings.udpPort);
-        std::cout << "UDP messaging enabled - target: " << settings.udpAddress << ":" << settings.udpPort
-                  << " message: \"" << settings.udpMessage << "\"" << std::endl;
-        DEBUG_PRINT("UDP sender created");
+    // Calculate file duration in output sample rate (for looping)
+    double fileDuration = (double)audioFilePlayer->getTotalFrames() / audioFilePlayer->getFileSampleRate();
+    uint64_t fileDurationFrames = (uint64_t)(fileDuration * jackSampleRate);
+
+    std::cout << "Audio: " << settings.outputChannels << "ch @ " << jackSampleRate << " Hz ("
+              << std::fixed << std::setprecision(1) << fileDuration << "s)" << std::endl;
+
+    // Setup JACK callback context
+    JackAudioContext jackContext;
+    jackContext.audioPlayer = audioFilePlayer.get();
+    jackContext.outputPorts = outputPorts;
+    jackContext.numOutputChannels = settings.outputChannels;
+    jackContext.client = jackClient;
+    jackContext.fileDurationFrames = fileDurationFrames;
+    jackContext.midiInputPort = midiInputPort;
+
+    // Register JACK process callback
+    if (jack_set_process_callback(jackClient, jackProcessCallback, &jackContext) != 0) {
+        std::cerr << "Failed to set JACK process callback" << std::endl;
+        jack_client_close(jackClient);
+        return 1;
     }
 
-    std::cout << "Adding audio callback..." << std::endl;
-    DEBUG_PRINT("About to add callback");
-    player->addCallback(*audioFilePlayer);
-    DEBUG_PRINT("Callback added");
+    // Register as JACK Transport timebase master
+    if (jack_set_timebase_callback(jackClient, 0, jackTimebaseCallback, &jackContext) != 0) {
+        std::cerr << "Failed to set JACK timebase callback" << std::endl;
+        jack_client_close(jackClient);
+        return 1;
+    }
+
+    // Activate JACK client
+    if (jack_activate(jackClient) != 0) {
+        std::cerr << "Failed to activate JACK client" << std::endl;
+        jack_client_close(jackClient);
+        return 1;
+    }
+
+    // Auto-connect JACK ports to system playback
+    const char** systemPorts = jack_get_ports(jackClient, "system:playback_", nullptr, JackPortIsInput);
+    if (systemPorts) {
+        for (int ch = 0; ch < settings.outputChannels && systemPorts[ch]; ch++) {
+            std::string ourPort = "consoleAudioPlayer:output_" + std::to_string(ch + 1);
+            jack_connect(jackClient, ourPort.c_str(), systemPorts[ch]);
+        }
+        jack_free(systemPorts);
+    }
+
+    // Auto-connect MIDI input to devices with "pico" or "CircuitPython" in name
+    if (midiInputPort) {
+        const char** midiPorts = jack_get_ports(jackClient, nullptr, JACK_DEFAULT_MIDI_TYPE, JackPortIsOutput);
+        if (midiPorts) {
+            bool connected = false;
+            for (int i = 0; midiPorts[i] != nullptr; i++) {
+                std::string portName = midiPorts[i];
+                // Check if port name contains "pico" or "CircuitPython" (case-insensitive)
+                std::string lowerName = portName;
+                std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
+
+                if (lowerName.find("pico") != std::string::npos ||
+                    lowerName.find("circuitpython") != std::string::npos) {
+                    if (jack_connect(jackClient, midiPorts[i], jack_port_name(midiInputPort)) == 0) {
+                        std::cout << "✓ MIDI: " << midiPorts[i] << std::endl;
+                        connected = true;
+                        break; // Connect to first matching device
+                    }
+                }
+            }
+            if (!connected) {
+                std::cout << "⚠ No MIDI device found" << std::endl;
+            }
+            jack_free(midiPorts);
+        }
+    }
 
     std::cout << "Playing file: " << settings.audioFilePath << "..." << std::endl;
+
+    // Start JACK Transport rolling
+    jack_transport_start(jackClient);
+    std::cout << "JACK Transport started" << std::endl;
 
     // Setup keyboard input
     auto termState = setupNonBlockingInput();
 
-    // Send initial PLAY command
-    if (udpSender) {
-        if (udpSender->send("PLAY")) {
-            std::cout << "UDP: Sent PLAY command" << std::endl;
-        }
-    }
-
     std::cout << "\nKeyboard controls:" << std::endl;
     std::cout << "  SPACE - Pause/Resume" << std::endl;
     std::cout << "  S     - Stop and reset to beginning" << std::endl;
+    std::cout << "  F     - Skip forward 10 seconds" << std::endl;
+    std::cout << "  D     - Skip forward 30 seconds" << std::endl;
+    std::cout << "  G     - Skip forward 60 seconds" << std::endl;
     std::cout << "  Q     - Quit" << std::endl << std::endl;
 
     bool running = true;
-    DEBUG_PRINT("Entering main playback loop");
     while (running) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
@@ -383,64 +459,138 @@ int main()
                 case ' ': // Space - toggle pause/play
                     if (audioFilePlayer->isStillPlaying()) {
                         audioFilePlayer->pause();
-                        std::cout << "⏸  Paused" << std::endl;
-                        if (udpSender) udpSender->send("PAUSE");
+                        jack_transport_stop(jackClient);
                     } else {
+                        jackContext.requestStop.store(false, std::memory_order_release);  // Clear stop lock
                         audioFilePlayer->play();
-                        std::cout << "▶  Playing" << std::endl;
-                        if (udpSender) udpSender->send("PLAY");
+                        jack_transport_start(jackClient);
                     }
                     break;
 
                 case 's':
                 case 'S':
                     audioFilePlayer->stop();
-                    std::cout << "⏹  Stopped" << std::endl;
-                    if (udpSender) udpSender->send("STOP");
+                    jackContext.lastKnownPosition.store(0, std::memory_order_release);
+                    jackContext.requestStop.store(true, std::memory_order_release);  // Lock at 0
+                    jack_transport_locate(jackClient, 0);
+                    jack_transport_stop(jackClient);
                     break;
+
+                case 'f':
+                case 'F': {
+                    // Seek audio - timebase callback will update JACK automatically
+                    audioFilePlayer->skipForward(10.0);
+                    std::cout << "⏩ Skipped +10s" << std::endl;
+                    break;
+                }
+
+                case 'd':
+                case 'D': {
+                    audioFilePlayer->skipForward(30.0);
+                    std::cout << "⏩ Skipped +30s" << std::endl;
+                    break;
+                }
+
+                case 'g':
+                case 'G': {
+                    audioFilePlayer->skipForward(60.0);
+                    std::cout << "⏩ Skipped +60s" << std::endl;
+                    break;
+                }
 
                 case 'q':
                 case 'Q':
-                    std::cout << "Quitting..." << std::endl;
                     running = false;
                     break;
             }
         }
 
-        // Check for loop detection and send UDP message
-        if (udpSender && audioFilePlayer->getLoopPlaybackDetected()) {
-            if (udpSender->send("SEEK 0")) {
-                std::cout << "↻  Loop detected - sent SEEK 0 to video player" << std::endl;
+        // Check for loop detection from file reader
+        if (audioFilePlayer->getLoopPlaybackDetected()) {
+            std::cout << "↻  Loop detected - file wrapped to start" << std::endl;
+            // Audio already looped seamlessly, JACK Transport will update automatically
+        }
+
+        // Handle MIDI transport requests (from audio callback)
+        if (jackContext.requestPlay.exchange(false, std::memory_order_acquire)) {
+            // If we're coming from stopped state, reset audio position first
+            bool wasStoppedAtZero = jackContext.requestStop.exchange(false, std::memory_order_acq_rel);
+            if (wasStoppedAtZero) {
+                // Reset audio to beginning
+                audioFilePlayer->stop();  // Resets fileReadPosition to 0 and clears buffer
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));  // Let buffer refill from 0
+                std::cout << "▶  Playing from start" << std::endl;
+            }
+            audioFilePlayer->play();
+            jack_transport_start(jackClient);
+        }
+        if (jackContext.requestStop.load(std::memory_order_acquire)) {
+            audioFilePlayer->stop();
+            jackContext.lastKnownPosition.store(0, std::memory_order_release);  // Force position to 0
+
+            // Immediately stop JACK Transport and reset to 0 (before delay, to prevent race)
+            jack_transport_locate(jackClient, 0);
+            jack_transport_stop(jackClient);
+
+            // Brief delay to let buffer refill from position 0 (prevents playing stale data)
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+            // Keep position locked at 0
+            jack_transport_locate(jackClient, 0);
+
+            // DON'T clear requestStop flag - keep it set so timebase callback
+            // continues forcing JACK position to EXACTLY 0 (prevents background
+            // fill thread from updating position as it refills buffer).
+            // Flag will be cleared when user presses play.
+        }
+
+        // Periodic MIDI auto-reconnect check (every 5 seconds)
+        static int midiReconnectCount = 0;
+        if (midiInputPort && midiReconnectCount++ % 5000 == 0) {
+            // Check if MIDI port is connected
+            const char** connections = jack_port_get_connections(midiInputPort);
+            if (!connections) {
+                // Not connected - try to find and connect to pico/CircuitPython
+                const char** midiPorts = jack_get_ports(jackClient, nullptr, JACK_DEFAULT_MIDI_TYPE, JackPortIsOutput);
+                if (midiPorts) {
+                    for (int i = 0; midiPorts[i] != nullptr; i++) {
+                        std::string portName = midiPorts[i];
+                        std::string lowerName = portName;
+                        std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
+
+                        if (lowerName.find("pico") != std::string::npos ||
+                            lowerName.find("circuitpython") != std::string::npos) {
+                            if (jack_connect(jackClient, midiPorts[i], jack_port_name(midiInputPort)) == 0) {
+                                break;
+                            }
+                        }
+                    }
+                    jack_free(midiPorts);
+                }
             } else {
-                std::cout << "Failed to send UDP message" << std::endl;
+                jack_free(connections);
             }
         }
 
-        // Monitor buffer health
-        static int reportCount = 0;
-        if (reportCount++ % 10000 == 0) // Every 10 seconds
-        {
-            uint32_t used = audioFilePlayer->getBufferUsedSlots();
-            uint32_t total = audioFilePlayer->getBufferSize();
-            double percentage = (double)used / total * 100.0;
-            std::cout << "Buffer: " << used << "/" << total << " ("
-                     << std::fixed << std::setprecision(1) << percentage << "%)" << std::endl;
-        }
+        // Monitor buffer health (disabled - enable if debugging buffer issues)
+        // static int reportCount = 0;
+        // if (reportCount++ % 10000 == 0) // Every 10 seconds
+        // {
+        //     uint32_t used = audioFilePlayer->getBufferUsedSlots();
+        //     uint32_t total = audioFilePlayer->getBufferSize();
+        //     double percentage = (double)used / total * 100.0;
+        //     std::cout << "Buffer: " << used << "/" << total << " ("
+        //              << std::fixed << std::setprecision(1) << percentage << "%)" << std::endl;
+        // }
     }
 
     std::cout << "\nPlayback finished." << std::endl;
 
-    // Send STOP to video player
-    if (udpSender) {
-        udpSender->send("STOP");
-    }
-
     // Restore terminal
     restoreTerminal(termState);
 
-    DEBUG_PRINT("Removing callback");
-    player->removeCallback(*audioFilePlayer);
-    DEBUG_PRINT("Program ending normally");
+    jack_deactivate(jackClient);
+    jack_client_close(jackClient);
 
     return 0;
 }

@@ -8,5 +8,5 @@
   "udpEnabled": true,
   "udpAddress": "255.255.255.255",
   "udpPort": 8080,
-  "udpMessage": "SEEK 0"
+  "udpMessage": "LOOP"
 }

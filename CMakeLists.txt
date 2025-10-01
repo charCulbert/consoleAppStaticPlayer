@@ -1,17 +1,17 @@
 cmake_minimum_required(VERSION 3.20)
-project(consoleAppStaticPlayer)
+project(consoleAudioPlayer)
 
-# Apply CHOC JACK disable patch (cross-platform)
+# Re-enable JACK in CHOC (undo the disable patch)
 execute_process(
-    COMMAND sed -i.bak "s/#define __UNIX_JACK__ 1/\\/\\/ #define __UNIX_JACK__ 1/" 
+    COMMAND sed -i.bak "s/\\/\\/ #define __UNIX_JACK__ 1/#define __UNIX_JACK__ 1/"
         ${CMAKE_SOURCE_DIR}/external/choc/choc/audio/io/choc_RtAudioPlayer.h
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     RESULT_VARIABLE PATCH_RESULT
 )
 if(PATCH_RESULT EQUAL 0)
-    message(STATUS "Applied CHOC JACK disable patch")
+    message(STATUS "Re-enabled CHOC JACK support")
 else()
-    message(WARNING "Failed to apply CHOC JACK patch, may already be applied")
+    message(WARNING "Failed to apply CHOC JACK enable patch, may already be enabled")
 endif()
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -23,42 +23,41 @@ include_directories(
     include/
 )
 
-add_executable(consoleAppStaticPlayer
+add_executable(consoleAudioPlayer
     src/main.cpp
     src/BufferedAudioFilePlayer.cpp
 )
 
 if(APPLE)
-    target_link_libraries(consoleAppStaticPlayer PRIVATE 
-        "-framework CoreAudio" 
-        "-framework AudioToolbox" 
-        "-framework CoreMIDI" 
+    target_link_libraries(consoleAudioPlayer PRIVATE
+        "-framework CoreAudio"
+        "-framework AudioToolbox"
+        "-framework CoreMIDI"
         "-framework CoreFoundation"
     )
     add_definitions(-D__MACOSX_CORE__)
-    
+
 elseif(UNIX AND NOT APPLE)
     # Linux - find required packages
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(ALSA REQUIRED alsa)
-    pkg_check_modules(GTK3 REQUIRED gtk+-3.0)
+    pkg_check_modules(JACK REQUIRED jack)
     find_package(Threads REQUIRED)
-    
-    
-    target_include_directories(consoleAppStaticPlayer PRIVATE 
+
+    target_include_directories(consoleAudioPlayer PRIVATE
         ${ALSA_INCLUDE_DIRS}
-        ${GTK3_INCLUDE_DIRS}
+        ${JACK_INCLUDE_DIRS}
     )
-    
-    target_link_libraries(consoleAppStaticPlayer
+
+    target_link_libraries(consoleAudioPlayer
         ${ALSA_LIBRARIES}
-        ${GTK3_LIBRARIES}
+        ${JACK_LIBRARIES}
         Threads::Threads
     )
-    
+
     # Debug output
     message(STATUS "ALSA libraries: ${ALSA_LIBRARIES}")
     message(STATUS "ALSA include dirs: ${ALSA_INCLUDE_DIRS}")
-    message(STATUS "GTK3 libraries: ${GTK3_LIBRARIES}")
-    message(STATUS "GTK3 include dirs: ${GTK3_INCLUDE_DIRS}")
+    message(STATUS "JACK libraries: ${JACK_LIBRARIES}")
+    message(STATUS "JACK include dirs: ${JACK_INCLUDE_DIRS}")
 endif()
