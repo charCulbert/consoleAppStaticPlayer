@@ -96,13 +96,6 @@ uint32_t BufferedAudioFilePlayer::getBufferSizeForSampleRate(double sampleRate) 
     return static_cast<uint32_t>(bufferSizeSeconds * sampleRate);
 }
 
-void BufferedAudioFilePlayer::sampleRateChanged(double newRate)
-{
-    outputSampleRate = newRate;
-    // For simplicity, we're not dynamically resizing the buffer
-    // In a production system, you'd want to handle this
-}
-
 void BufferedAudioFilePlayer::setOutputSampleRate(double rate)
 {
     outputSampleRate = rate;
@@ -199,12 +192,9 @@ void BufferedAudioFilePlayer::fillBufferFromFile()
     // Handle file looping
     if (currentFilePos >= totalFrames)
     {
-        // Loop detected - increment sequence number and mark buffer position
-        loopSequenceNumber.fetch_add(1);
-        samplesUntilLoopAudible.store(audioBuffer.getUsedSlots());
-
         currentFilePos = 0;
         fileReadPosition = 0;
+        loopPlaybackDetected.store(true, std::memory_order_release);
     }
 
     try
@@ -216,11 +206,9 @@ void BufferedAudioFilePlayer::fillBufferFromFile()
         if (actualFramesToRead == 0)
         {
             // End of file, loop back
-            loopSequenceNumber.fetch_add(1);
-            samplesUntilLoopAudible.store(audioBuffer.getUsedSlots());
-
             currentFilePos = 0;
             fileReadPosition = 0;
+            loopPlaybackDetected.store(true, std::memory_order_release);
             return;
         }
 
@@ -359,14 +347,10 @@ void BufferedAudioFilePlayer::fillBufferFromFile()
     }
 }
 
-void BufferedAudioFilePlayer::processSubBlock(const choc::audio::AudioMIDIBlockDispatcher::Block& block,
-                                              bool replaceOutput)
+void BufferedAudioFilePlayer::processBlock(choc::buffer::ChannelArrayView<float> output)
 {
-    auto& output = block.audioOutput;
-
     // Always clear output first to avoid clicks/pops
-    if (replaceOutput)
-        output.clear();
+    output.clear();
 
     if (!isPlaying || !fileLoaded)
     {
@@ -381,39 +365,19 @@ void BufferedAudioFilePlayer::processSubBlock(const choc::audio::AudioMIDIBlockD
     if (audioBuffer.getUsedSlots() < samplesNeeded)
     {
         // Buffer underrun - output silence (already cleared)
-        static int underrunCount = 0;
-        if (underrunCount++ % 100 == 0)
-        {
-            std::cout << "Buffer underrun! Need " << samplesNeeded << " samples, have "
-                     << audioBuffer.getUsedSlots() << std::endl;
-        }
+        // NOTE: Avoid I/O in audio callback - uncomment for debugging only
+        // static int underrunCount = 0;
+        // if (underrunCount++ % 100 == 0)
+        // {
+        //     std::cout << "Buffer underrun! Need " << samplesNeeded << " samples, have "
+        //              << audioBuffer.getUsedSlots() << std::endl;
+        // }
         return;
     }
 
-    // Loop playback detection - check if we've played enough samples to reach a loop point
-    static uint32_t lastSeenLoopSeq = 0;
-    static uint32_t samplesConsumedSinceLastLoop = 0;
-
-    uint32_t currentLoopSeq = loopSequenceNumber.load();
-    uint32_t samplesToLoop = samplesUntilLoopAudible.load();
-
-    // New loop detected?
-    if (currentLoopSeq > lastSeenLoopSeq)
-    {
-        samplesConsumedSinceLastLoop = 0;  // Reset counter
-        lastSeenLoopSeq = currentLoopSeq;
-    }
-
-    // Check if we've played enough samples to reach the loop point
-    samplesConsumedSinceLastLoop += samplesNeeded;
-    if (samplesToLoop > 0 && samplesConsumedSinceLastLoop >= samplesToLoop)
-    {
-        loopPlaybackDetected.store(true);  // Signal UDP sender
-        samplesUntilLoopAudible.store(0);  // Clear marker
-        std::cout << "Loop playback detected! Sequence: " << currentLoopSeq << std::endl;
-    }
-
     // Read samples from buffer and convert from interleaved to channel format
+    float gain = currentGain.load(std::memory_order_relaxed);
+
     for (uint32_t frame = 0; frame < numFrames; ++frame)
     {
         // Read one frame of interleaved samples
@@ -424,21 +388,41 @@ void BufferedAudioFilePlayer::processSubBlock(const choc::audio::AudioMIDIBlockD
             audioBuffer.pop(frameSamples[channel]);
         }
 
-        // Copy to output channels
+        // Copy to output channels with gain applied
         for (uint32_t channel = 0; channel < numOutputChannels; ++channel)
         {
             uint32_t sourceChannel = std::min(channel, numChannels - 1);
-            float sample = frameSamples[sourceChannel];
-
-            if (replaceOutput)
-                output.getSample(channel, frame) = sample;
-            else
-                output.getSample(channel, frame) += sample;
+            float sample = frameSamples[sourceChannel] * gain;
+            output.getSample(channel, frame) = sample;
         }
     }
 
-    // Update audio clock position (lock-free atomic write - safe for real-time thread)
-    uint64_t samplesPlayed = totalSamplesPlayed.fetch_add(numFrames, std::memory_order_relaxed);
-    double positionSeconds = (double)(samplesPlayed + numFrames) / outputSampleRate;
-    currentAudioPosition.store(positionSeconds, std::memory_order_relaxed);
+    // Position is tracked via fileReadPosition - no additional counter needed
+}
+
+uint64_t BufferedAudioFilePlayer::skipForward(double seconds)
+{
+    if (!fileLoaded) return getCurrentOutputFrame();
+
+    // Calculate new file position (in file's sample rate)
+    uint64_t framesToSkip = static_cast<uint64_t>(seconds * fileSampleRate);
+    uint64_t currentFilePos = fileReadPosition.load();
+    uint64_t newFilePos = currentFilePos + framesToSkip;
+
+    // Handle wrap-around if we skip past the end
+    if (newFilePos >= totalFrames)
+    {
+        newFilePos = newFilePos % totalFrames;
+    }
+
+    // Just update file position atomically - buffer will refill automatically
+    fileReadPosition.store(newFilePos, std::memory_order_release);
+
+    // Clear buffer so we don't play stale audio
+    audioBuffer.reset(bufferSize);
+
+    std::cout << "Seek to " << std::fixed << std::setprecision(2)
+              << (double)newFilePos / fileSampleRate << "s" << std::endl;
+
+    return getCurrentOutputFrame();
 }

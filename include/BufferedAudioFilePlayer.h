@@ -1,7 +1,7 @@
 #pragma once
 
-#include "choc/audio/io/choc_AudioMIDIPlayer.h"
 #include "choc/audio/choc_AudioFileFormat.h"
+#include "choc/audio/choc_AudioSampleData.h"
 #include "choc/containers/choc_SingleReaderSingleWriterFIFO.h"
 #include "choc/threading/choc_TaskThread.h"
 #include <string>
@@ -10,18 +10,16 @@
 
 // Simple buffered audio file player using CHOC's FIFO for low-memory systems
 // Keeps a small ring buffer (few seconds) filled by background thread
-class BufferedAudioFilePlayer : public choc::audio::io::AudioMIDICallback
+class BufferedAudioFilePlayer
 {
 public:
     BufferedAudioFilePlayer(const std::string& filePath, double outputSampleRate = 48000.0);
-    ~BufferedAudioFilePlayer() override;
+    ~BufferedAudioFilePlayer();
 
-    void sampleRateChanged(double newRate) override;
     void setOutputSampleRate(double rate);
-    void startBlock() override {}
-    void processSubBlock(const choc::audio::AudioMIDIBlockDispatcher::Block& block,
-                         bool replaceOutput) override;
-    void endBlock() override {}
+
+    // Audio processing (called from JACK callback)
+    void processBlock(choc::buffer::ChannelArrayView<float> output);
 
     bool isLoaded() const { return fileLoaded; }
     bool isStillPlaying() const { return isPlaying; }
@@ -32,25 +30,33 @@ public:
     // Playback control
     void play() { isPlaying = true; }
     void pause() { isPlaying = false; }
-    void stop() { isPlaying = false; fileReadPosition = 0; audioBuffer.reset(bufferSize); totalSamplesPlayed = 0; currentAudioPosition = 0.0; }
-    void skipForward(double seconds);  // Skip forward by N seconds
+    void stop() { isPlaying = false; fileReadPosition = 0; audioBuffer.reset(bufferSize); }
+    uint64_t skipForward(double seconds);  // Returns new position (for JACK sync)
+
+    // Volume control (0.0 to 1.0)
+    void setGain(float gain) { currentGain.store(std::clamp(gain, 0.0f, 1.0f), std::memory_order_relaxed); }
+    float getGain() const { return currentGain.load(std::memory_order_relaxed); }
 
     // For monitoring buffer health
     uint32_t getBufferUsedSlots() const { return audioBuffer.getUsedSlots(); }
     uint32_t getBufferSize() const { return bufferSize; }
 
-    // For loop detection and UDP messaging
+    // For loop detection
     std::atomic<bool> getLoopPlaybackDetected() { return loopPlaybackDetected.exchange(false); }
 
-    // Reset position counters to 0 (for loop handling - keeps playing)
-    void resetAudioPosition() {
-        totalSamplesPlayed = 0;
-        currentAudioPosition = 0.0;
+    // Get current playback position in output sample rate (for JACK Transport)
+    uint64_t getCurrentOutputFrame() const {
+        // Convert file position (in file sample rate) to output sample rate
+        uint64_t filePos = fileReadPosition.load(std::memory_order_relaxed);
+        if (fileSampleRate == 0.0) return 0;
+        double positionSeconds = (double)filePos / fileSampleRate;
+        return (uint64_t)(positionSeconds * outputSampleRate);
     }
 
-    // Audio clock sync - get current playback position (lock-free, safe from any thread)
-    double getCurrentAudioPosition() const { return currentAudioPosition.load(std::memory_order_relaxed); }
-    uint64_t getTotalSamplesPlayed() const { return totalSamplesPlayed.load(std::memory_order_relaxed); }
+    // File info (for JACK Transport sync)
+    uint64_t getTotalFrames() const { return totalFrames; }
+    double getFileSampleRate() const { return fileSampleRate; }
+    double getOutputSampleRate() const { return outputSampleRate; }
 
 private:
     std::string filePath;
@@ -64,6 +70,7 @@ private:
 
     std::atomic<bool> isPlaying{true};
     std::atomic<bool> fileLoaded{false};
+    std::atomic<float> currentGain{1.0f};  // Volume: 0.0 = silence, 1.0 = full
     std::string errorMessage;
 
     // Simple interleaved FIFO buffer
@@ -78,14 +85,8 @@ private:
     choc::threading::TaskThread backgroundThread;
     std::atomic<bool> shouldStopLoading{false};
 
-    // Loop detection atomics
-    std::atomic<uint32_t> loopSequenceNumber{0};
-    std::atomic<uint32_t> samplesUntilLoopAudible{0};
+    // Loop detection
     std::atomic<bool> loopPlaybackDetected{false};
-
-    // Audio clock synchronization - lock-free for real-time thread safety
-    std::atomic<double> currentAudioPosition{0.0};
-    std::atomic<uint64_t> totalSamplesPlayed{0};
 
     bool loadAudioFile();
     void backgroundLoadingTask();

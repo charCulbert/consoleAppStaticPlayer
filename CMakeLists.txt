@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(consoleAppStaticPlayer)
+project(consoleAudioPlayer)
 
 # Re-enable JACK in CHOC (undo the disable patch)
 execute_process(
@@ -23,39 +23,34 @@ include_directories(
     include/
 )
 
-add_executable(consoleAppStaticPlayer
+add_executable(consoleAudioPlayer
     src/main.cpp
     src/BufferedAudioFilePlayer.cpp
-    src/JackTransportController.cpp
 )
 
 if(APPLE)
-    target_link_libraries(consoleAppStaticPlayer PRIVATE 
-        "-framework CoreAudio" 
-        "-framework AudioToolbox" 
-        "-framework CoreMIDI" 
+    target_link_libraries(consoleAudioPlayer PRIVATE
+        "-framework CoreAudio"
+        "-framework AudioToolbox"
+        "-framework CoreMIDI"
         "-framework CoreFoundation"
     )
     add_definitions(-D__MACOSX_CORE__)
-    
+
 elseif(UNIX AND NOT APPLE)
     # Linux - find required packages
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(ALSA REQUIRED alsa)
-    pkg_check_modules(GTK3 REQUIRED gtk+-3.0)
     pkg_check_modules(JACK REQUIRED jack)
     find_package(Threads REQUIRED)
 
-
-    target_include_directories(consoleAppStaticPlayer PRIVATE
+    target_include_directories(consoleAudioPlayer PRIVATE
         ${ALSA_INCLUDE_DIRS}
-        ${GTK3_INCLUDE_DIRS}
         ${JACK_INCLUDE_DIRS}
     )
 
-    target_link_libraries(consoleAppStaticPlayer
+    target_link_libraries(consoleAudioPlayer
         ${ALSA_LIBRARIES}
-        ${GTK3_LIBRARIES}
         ${JACK_LIBRARIES}
         Threads::Threads
     )
@@ -63,8 +58,6 @@ elseif(UNIX AND NOT APPLE)
     # Debug output
     message(STATUS "ALSA libraries: ${ALSA_LIBRARIES}")
     message(STATUS "ALSA include dirs: ${ALSA_INCLUDE_DIRS}")
-    message(STATUS "GTK3 libraries: ${GTK3_LIBRARIES}")
-    message(STATUS "GTK3 include dirs: ${GTK3_INCLUDE_DIRS}")
     message(STATUS "JACK libraries: ${JACK_LIBRARIES}")
     message(STATUS "JACK include dirs: ${JACK_INCLUDE_DIRS}")
 endif()
