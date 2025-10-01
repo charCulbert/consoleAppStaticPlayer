@@ -104,26 +104,6 @@ void BufferedAudioFilePlayer::setOutputSampleRate(double rate)
     audioBuffer.reset(bufferSize);
 }
 
-void BufferedAudioFilePlayer::skipForward(double seconds)
-{
-    // Calculate new file position
-    uint64_t samplesToSkip = (uint64_t)(seconds * fileSampleRate);
-    uint64_t newPosition = fileReadPosition.load() + samplesToSkip;
-
-    // Wrap around if past end
-    if (newPosition >= totalFrames) {
-        newPosition = newPosition % totalFrames;
-    }
-
-    // Update positions
-    fileReadPosition = newPosition;
-    totalSamplesPlayed = newPosition;
-    currentAudioPosition = (double)newPosition / fileSampleRate;
-
-    // Clear buffer (old data is stale after seek)
-    audioBuffer.reset(bufferSize);
-}
-
 void BufferedAudioFilePlayer::startPlayback()
 {
     if (!fileLoaded) return;
