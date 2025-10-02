@@ -26,6 +26,7 @@ include_directories(
 add_executable(consoleAudioPlayer
     src/main.cpp
     src/BufferedAudioFilePlayer.cpp
+    src/JackClient.cpp
 )
 
 if(APPLE)
