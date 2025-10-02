@@ -377,7 +377,8 @@ void BufferedAudioFilePlayer::processBlock(choc::buffer::ChannelArrayView<float>
         }
     }
 
-    // Position is tracked via fileReadPosition - no additional counter needed
+    // Update playback position counter (actual samples sent to output)
+    totalSamplesPlayed.fetch_add(numFrames, std::memory_order_relaxed);
 }
 
 uint64_t BufferedAudioFilePlayer::skipForward(double seconds)
@@ -397,6 +398,11 @@ uint64_t BufferedAudioFilePlayer::skipForward(double seconds)
 
     // Just update file position atomically - buffer will refill automatically
     fileReadPosition.store(newFilePos, std::memory_order_release);
+
+    // Update playback position to match (convert from file sample rate to output sample rate)
+    double newPositionSeconds = (double)newFilePos / fileSampleRate;
+    uint64_t newOutputFrame = (uint64_t)(newPositionSeconds * outputSampleRate);
+    totalSamplesPlayed.store(newOutputFrame, std::memory_order_release);
 
     // Clear buffer so we don't play stale audio
     audioBuffer.reset(bufferSize);

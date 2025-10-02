@@ -30,7 +30,7 @@ public:
     // Playback control
     void play() { isPlaying = true; }
     void pause() { isPlaying = false; }
-    void stop() { isPlaying = false; fileReadPosition = 0; audioBuffer.reset(bufferSize); }
+    void stop() { isPlaying = false; fileReadPosition = 0; totalSamplesPlayed = 0; audioBuffer.reset(bufferSize); }
     uint64_t skipForward(double seconds);  // Returns new position (for JACK sync)
 
     // Volume control (0.0 to 1.0)
@@ -46,11 +46,8 @@ public:
 
     // Get current playback position in output sample rate (for JACK Transport)
     uint64_t getCurrentOutputFrame() const {
-        // Convert file position (in file sample rate) to output sample rate
-        uint64_t filePos = fileReadPosition.load(std::memory_order_relaxed);
-        if (fileSampleRate == 0.0) return 0;
-        double positionSeconds = (double)filePos / fileSampleRate;
-        return (uint64_t)(positionSeconds * outputSampleRate);
+        // Return actual playback position (samples sent to speakers)
+        return totalSamplesPlayed.load(std::memory_order_relaxed);
     }
 
     // File info (for JACK Transport sync)
@@ -80,6 +77,9 @@ private:
 
     // File reading state
     std::atomic<uint64_t> fileReadPosition{0};
+
+    // Playback position tracking (actual samples sent to output)
+    std::atomic<uint64_t> totalSamplesPlayed{0};
 
     // Background loading
     choc::threading::TaskThread backgroundThread;
