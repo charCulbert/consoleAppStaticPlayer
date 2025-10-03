@@ -52,9 +52,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Pre-fill audio buffer
-    player.initializeBuffer();
-
     // Activate JACK and start transport
     if (!jackClient.activate()) {
         std::cerr << "Error: Failed to activate JACK client" << std::endl;

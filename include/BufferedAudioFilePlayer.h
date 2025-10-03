@@ -21,8 +21,6 @@ public:
     bool isLoaded() const { return fileLoaded; }
     std::string getErrorMessage() const { return errorMessage; }
 
-    void initializeBuffer();
-
     uint64_t getTotalFrames() const { return totalFrames; }
     uint32_t getNumChannels() const { return numChannels; }
     double getFileSampleRate() const { return fileSampleRate; }
@@ -40,20 +38,9 @@ private:
 
     std::atomic<bool> fileLoaded{false};
 
-    // Simple interleaved FIFO buffer
-    choc::fifo::SingleReaderSingleWriterFIFO<float> audioBuffer;
-    static constexpr uint32_t bufferSizeSeconds = 3; // Keep 3 seconds buffered
-    uint32_t bufferSize = 0; // Will be calculated based on sample rate
-
-    // File reading state (for background thread to know where to read from)
-    std::atomic<uint64_t> fileReadPosition{0};
-
-    // Background loading
-    choc::threading::TaskThread backgroundThread;
-    std::atomic<bool> shouldStopLoading{false};
+    // Full audio file loaded into memory (channel-interleaved)
+    std::vector<float> audioData;
+    std::atomic<uint64_t> playbackPosition{0}; // Current playback position in frames
 
     bool loadAudioFile();
-    void backgroundLoadingTask();
-    void fillBufferFromFile();
-    uint32_t getBufferSizeForSampleRate(double sampleRate) const;
 };

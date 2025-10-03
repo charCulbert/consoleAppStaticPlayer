@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <iomanip>
 
-using std::cerr;
 
 BufferedAudioFilePlayer::BufferedAudioFilePlayer(const std::string &filePath,
                                                  double outputSampleRate)
@@ -14,16 +13,14 @@ BufferedAudioFilePlayer::BufferedAudioFilePlayer(const std::string &filePath,
     return;
   }
 
-  // Calculate buffer size for output sample rate (interleaved samples)
-  bufferSize = getBufferSizeForSampleRate(outputSampleRate) * numChannels;
-  audioBuffer.reset(bufferSize);
-
   std::cout << "File: " << filePath << std::endl;
   std::cout << "  Sample rate: " << fileSampleRate << " Hz" << std::endl;
   std::cout << "  Channels: " << numChannels << std::endl;
   std::cout << "  Frames: " << totalFrames << std::endl;
   std::cout << "  Duration: " << std::fixed << std::setprecision(1)
             << (double)totalFrames / fileSampleRate << "s" << std::endl;
+  std::cout << "  Memory: " << std::fixed << std::setprecision(1)
+            << (audioData.size() * sizeof(float)) / (1024.0 * 1024.0) << " MB" << std::endl;
 
   bool needsResampling = (std::abs(fileSampleRate - outputSampleRate) > 0.1);
   if (needsResampling) {
@@ -35,8 +32,6 @@ BufferedAudioFilePlayer::BufferedAudioFilePlayer(const std::string &filePath,
 
 BufferedAudioFilePlayer::~BufferedAudioFilePlayer()
 {
-    shouldStopLoading = true;
-    backgroundThread.stop();
 }
 
 bool BufferedAudioFilePlayer::loadAudioFile()
@@ -71,6 +66,49 @@ bool BufferedAudioFilePlayer::loadAudioFile()
             return false;
         }
 
+        // Load entire file into memory (interleaved format)
+        std::cout << "Loading entire file into memory..." << std::flush;
+
+        audioData.resize(totalFrames * numChannels);
+
+        // Load in chunks to show progress and avoid timeout
+        const uint64_t chunkSize = 48000 * 10; // 10 seconds at 48kHz
+        uint64_t framesLoaded = 0;
+
+        while (framesLoaded < totalFrames)
+        {
+            uint64_t framesToRead = std::min(chunkSize, totalFrames - framesLoaded);
+
+            // Create buffer for reading
+            choc::buffer::ChannelArrayBuffer<float> readBuffer(
+                choc::buffer::Size::create(numChannels, static_cast<uint32_t>(framesToRead)));
+
+            // Read chunk
+            auto readView = readBuffer.getView();
+            if (!fileReader->readFrames(framesLoaded, readView))
+            {
+                errorMessage = "Failed to read audio data";
+                return false;
+            }
+
+            // Convert to interleaved format
+            for (uint64_t frame = 0; frame < framesToRead; ++frame)
+            {
+                for (uint32_t channel = 0; channel < numChannels; ++channel)
+                {
+                    audioData[(framesLoaded + frame) * numChannels + channel] = readView.getSample(channel, frame);
+                }
+            }
+
+            framesLoaded += framesToRead;
+
+            // Progress indicator
+            int percent = (int)((framesLoaded * 100) / totalFrames);
+            std::cout << "\rLoading entire file into memory... " << percent << "%" << std::flush;
+        }
+
+        std::cout << std::endl;
+
         fileLoaded = true;
         std::cout << "Audio file loaded successfully" << std::endl;
         return true;
@@ -82,255 +120,38 @@ bool BufferedAudioFilePlayer::loadAudioFile()
     }
 }
 
-uint32_t BufferedAudioFilePlayer::getBufferSizeForSampleRate(double sampleRate) const
-{
-    return static_cast<uint32_t>(bufferSizeSeconds * sampleRate);
-}
-
-void BufferedAudioFilePlayer::initializeBuffer()
-{
-    if (!fileLoaded) return;
-
-    std::cout << "Pre-buffering..." << std::endl;
-
-    // Pre-fill buffer
-    uint32_t targetFill = bufferSize * 9/10; // Fill to 90%
-    while (audioBuffer.getUsedSlots() < targetFill)
-    {
-        fillBufferFromFile();
-
-        // Avoid infinite loop if we can't fill more
-        static uint32_t lastFillLevel = 0;
-        uint32_t currentFill = audioBuffer.getUsedSlots();
-        if (currentFill == lastFillLevel)
-        {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            static int stuckCount = 0;
-            if (++stuckCount > 10) break;
-        }
-        else
-        {
-            lastFillLevel = currentFill;
-        }
-    }
-
-    // Start background loading thread
-    backgroundThread.start(10, [this] { backgroundLoadingTask(); });
-}
-
-void BufferedAudioFilePlayer::backgroundLoadingTask()
-{
-    if (shouldStopLoading || !fileLoaded)
-        return;
-
-    // Keep buffer filled
-    if (audioBuffer.getFreeSlots() > numChannels * 512) // If we have space for 512+ frames
-    {
-        fillBufferFromFile();
-    }
-}
-
-void BufferedAudioFilePlayer::fillBufferFromFile()
-{
-    static constexpr uint32_t chunkFrames = 1024; // Read 1024 frames at a time
-
-    uint32_t freeSlots = audioBuffer.getFreeSlots();
-    uint32_t freeFrames = freeSlots / numChannels;
-
-    if (freeFrames < chunkFrames)
-        return; // Not enough space
-
-    uint32_t framesToRead = std::min(chunkFrames, freeFrames);
-    uint64_t currentFilePos = fileReadPosition.load();
-
-    // Handle file looping
-    if (currentFilePos >= totalFrames)
-    {
-        currentFilePos = 0;
-        fileReadPosition = 0;
-    }
-
-    try
-    {
-        // Calculate actual frames to read (don't read past end of file)
-        uint32_t availableFrames = static_cast<uint32_t>(totalFrames - currentFilePos);
-        uint32_t actualFramesToRead = std::min(framesToRead, availableFrames);
-
-        if (actualFramesToRead == 0)
-        {
-            // End of file, loop back
-            currentFilePos = 0;
-            fileReadPosition = 0;
-            return;
-        }
-
-        // Check if we need resampling
-        bool needsResampling = (std::abs(fileSampleRate - outputSampleRate) > 0.1);
-
-        if (needsResampling)
-        {
-            // Use simple linear interpolation for real-time performance
-            double sampleRateRatio = fileSampleRate / outputSampleRate;
-            uint32_t fileFramesToRead = static_cast<uint32_t>(actualFramesToRead * sampleRateRatio) + 2;
-            fileFramesToRead = std::min(fileFramesToRead, availableFrames);
-
-            // Create buffer for file data
-            choc::buffer::ChannelArrayBuffer<float> fileBuffer(
-                choc::buffer::Size::create(numChannels, fileFramesToRead));
-
-            // Read from file
-            auto fileView = fileBuffer.getView().getStart(fileFramesToRead);
-            bool success = fileReader->readFrames(currentFilePos, fileView);
-
-            if (success)
-            {
-                // Cubic interpolation - better quality than linear, still efficient
-                for (uint32_t outFrame = 0; outFrame < actualFramesToRead; ++outFrame)
-                {
-                    double sourcePos = outFrame * sampleRateRatio;
-                    uint32_t sourceFrame = static_cast<uint32_t>(sourcePos);
-                    double fraction = sourcePos - sourceFrame;
-
-                    if (sourceFrame + 3 < fileFramesToRead && sourceFrame > 0)
-                    {
-                        // Cubic interpolation using 4 points
-                        for (uint32_t channel = 0; channel < numChannels; ++channel)
-                        {
-                            float y0 = fileView.getSample(channel, sourceFrame - 1);
-                            float y1 = fileView.getSample(channel, sourceFrame);
-                            float y2 = fileView.getSample(channel, sourceFrame + 1);
-                            float y3 = fileView.getSample(channel, sourceFrame + 2);
-
-                            // Catmull-Rom cubic interpolation
-                            float a0 = -0.5f * y0 + 1.5f * y1 - 1.5f * y2 + 0.5f * y3;
-                            float a1 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
-                            float a2 = -0.5f * y0 + 0.5f * y2;
-                            float a3 = y1;
-
-                            float t = static_cast<float>(fraction);
-                            float interpolated = a0 * t * t * t + a1 * t * t + a2 * t + a3;
-
-                            if (!audioBuffer.push(interpolated))
-                            {
-                                fileReadPosition = currentFilePos + sourceFrame;
-                                return;
-                            }
-                        }
-                    }
-                    else if (sourceFrame + 1 < fileFramesToRead)
-                    {
-                        // Fall back to linear interpolation at boundaries
-                        for (uint32_t channel = 0; channel < numChannels; ++channel)
-                        {
-                            float sample1 = fileView.getSample(channel, sourceFrame);
-                            float sample2 = fileView.getSample(channel, sourceFrame + 1);
-                            float interpolated = sample1 + fraction * (sample2 - sample1);
-
-                            if (!audioBuffer.push(interpolated))
-                            {
-                                fileReadPosition = currentFilePos + sourceFrame;
-                                return;
-                            }
-                        }
-                    }
-                    else if (sourceFrame < fileFramesToRead)
-                    {
-                        // At end, just use the last sample
-                        for (uint32_t channel = 0; channel < numChannels; ++channel)
-                        {
-                            float sample = fileView.getSample(channel, sourceFrame);
-                            if (!audioBuffer.push(sample))
-                            {
-                                fileReadPosition = currentFilePos + sourceFrame;
-                                return;
-                            }
-                        }
-                    }
-                }
-
-                // Update file position
-                fileReadPosition = currentFilePos + fileFramesToRead;
-            }
-            else
-            {
-              cerr << "Failed to read from audio file during resampling"
-                   << std::endl;
-            }
-        }
-        else
-        {
-            // No resampling needed - direct copy
-            choc::buffer::ChannelArrayBuffer<float> readBuffer(
-                choc::buffer::Size::create(numChannels, actualFramesToRead));
-
-            // Read frames from file
-            auto readView = readBuffer.getView().getStart(actualFramesToRead);
-            bool success = fileReader->readFrames(currentFilePos, readView);
-
-            if (success)
-            {
-                // Push samples to FIFO buffer in interleaved format
-                for (uint32_t frame = 0; frame < actualFramesToRead; ++frame)
-                {
-                    for (uint32_t channel = 0; channel < numChannels; ++channel)
-                    {
-                        float sample = readView.getSample(channel, frame);
-
-                        // If buffer is full, we're done for now
-                        if (!audioBuffer.push(sample))
-                        {
-                            fileReadPosition = currentFilePos + frame;
-                            return;
-                        }
-                    }
-                }
-
-                // Update file position
-                fileReadPosition = currentFilePos + actualFramesToRead;
-            }
-            else
-            {
-              cerr << "Failed to read from audio file" << std::endl;
-            }
-        }
-    }
-    catch (const std::exception& e)
-    {
-      cerr << "Error reading from audio file: " << e.what() << std::endl;
-    }
-}
-
 void BufferedAudioFilePlayer::processBlock(choc::buffer::ChannelArrayView<float> output)
 {
     output.clear();
 
-    if (!fileLoaded) return;
+    if (!fileLoaded || audioData.empty()) return;
 
     auto numFrames = output.getNumFrames();
     auto numOutputChannels = output.getNumChannels();
 
-    // Check if we have enough samples in buffer
-    uint32_t samplesNeeded = numFrames * numChannels;
-    if (audioBuffer.getUsedSlots() < samplesNeeded) {
-        // Buffer underrun - output silence (already cleared)
-        return;
-    }
+    uint64_t currentPos = playbackPosition.load();
 
-    // Read samples from buffer (interleaved) and write to output (channel array)
+    // Read samples directly from memory (interleaved) and write to output (channel array)
     for (uint32_t frame = 0; frame < numFrames; ++frame)
     {
-        float frameSamples[8] = {0}; // Support up to 8 channels
-
-        for (uint32_t channel = 0; channel < numChannels && channel < 8; ++channel)
+        // Handle looping
+        if (currentPos >= totalFrames)
         {
-            audioBuffer.pop(frameSamples[channel]);
+            currentPos = 0;
         }
 
-        // Copy to output channels
+        // Read interleaved samples from memory
+        uint64_t sampleIndex = currentPos * numChannels;
+
         for (uint32_t channel = 0; channel < numOutputChannels; ++channel)
         {
             uint32_t sourceChannel = std::min(channel, numChannels - 1);
-            output.getSample(channel, frame) = frameSamples[sourceChannel];
+            output.getSample(channel, frame) = audioData[sampleIndex + sourceChannel];
         }
+
+        currentPos++;
     }
+
+    // Update playback position
+    playbackPosition.store(currentPos);
 }
