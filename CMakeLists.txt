@@ -1,18 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(consoleAudioPlayer)
 
-# Re-enable JACK in CHOC (undo the disable patch)
-execute_process(
-    COMMAND sed -i.bak "s/\\/\\/ #define __UNIX_JACK__ 1/#define __UNIX_JACK__ 1/"
-        ${CMAKE_SOURCE_DIR}/external/choc/choc/audio/io/choc_RtAudioPlayer.h
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    RESULT_VARIABLE PATCH_RESULT
-)
-if(PATCH_RESULT EQUAL 0)
-    message(STATUS "Re-enabled CHOC JACK support")
-else()
-    message(WARNING "Failed to apply CHOC JACK enable patch, may already be enabled")
-endif()
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 20)
@@ -30,13 +18,30 @@ add_executable(consoleAudioPlayer
 )
 
 if(APPLE)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(JACK REQUIRED jack)
+
+    target_include_directories(consoleAudioPlayer PRIVATE
+        ${JACK_INCLUDE_DIRS}
+    )
+
+    target_link_directories(consoleAudioPlayer PRIVATE
+        ${JACK_LIBRARY_DIRS}
+    )
+
     target_link_libraries(consoleAudioPlayer PRIVATE
         "-framework CoreAudio"
         "-framework AudioToolbox"
         "-framework CoreMIDI"
         "-framework CoreFoundation"
+        ${JACK_LIBRARIES}
     )
     add_definitions(-D__MACOSX_CORE__)
+
+    # Debug output
+    message(STATUS "JACK include dirs: ${JACK_INCLUDE_DIRS}")
+    message(STATUS "JACK library dirs: ${JACK_LIBRARY_DIRS}")
+    message(STATUS "JACK libraries: ${JACK_LIBRARIES}")
 
 elseif(UNIX AND NOT APPLE)
     # Linux - find required packages
